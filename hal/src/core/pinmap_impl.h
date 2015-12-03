@@ -42,7 +42,6 @@ typedef struct STM32_Pin_Info {
   uint16_t timer_ch;
   PinMode pin_mode;
   uint16_t timer_ccr;
-  uint16_t pwm_frequency;
   int32_t user_property;
 } STM32_Pin_Info;
 

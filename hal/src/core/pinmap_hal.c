@@ -41,30 +41,29 @@ STM32_Pin_Info PIN_MAP[TOTAL_PINS] =
  * timer_ch (1-4, or NONE)
  * pin_mode (NONE by default, can be set to OUTPUT, INPUT, or other types)
  * timer_ccr (0 by default, store the CCR value for TIM interrupt use)
- * pwm_frequency (500 Hz by default)
  * user_property (0 by default, user variable storage)
  */
-  { GPIOB, GPIO_Pin_7, GPIO_PinSource7, NONE, TIM4, TIM_Channel_2, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_6, GPIO_PinSource6, NONE, TIM4, TIM_Channel_1, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_5, GPIO_PinSource5, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_4, GPIO_PinSource4, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_3, GPIO_PinSource3, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_15, GPIO_PinSource15, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_14, GPIO_PinSource14, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_13, GPIO_PinSource13, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_8, GPIO_PinSource8, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_9, GPIO_PinSource9, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_0, GPIO_PinSource0, ADC_Channel_0, TIM2, TIM_Channel_1, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_1, GPIO_PinSource1, ADC_Channel_1, TIM2, TIM_Channel_2, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_4, GPIO_PinSource4, ADC_Channel_4, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_5, GPIO_PinSource5, ADC_Channel_5, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_6, GPIO_PinSource6, ADC_Channel_6, TIM3, TIM_Channel_1, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_7, GPIO_PinSource7, ADC_Channel_7, TIM3, TIM_Channel_2, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_0, GPIO_PinSource0, ADC_Channel_8, TIM3, TIM_Channel_3, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_1, GPIO_PinSource1, ADC_Channel_9, TIM3, TIM_Channel_4, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_3, GPIO_PinSource3, ADC_Channel_3, TIM2, TIM_Channel_4, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOA, GPIO_Pin_2, GPIO_PinSource2, ADC_Channel_2, TIM2, TIM_Channel_3, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 },
-  { GPIOB, GPIO_Pin_2, GPIO_PinSource2, NONE, NULL, NONE, PIN_MODE_NONE, 0, TIM_PWM_FREQ, 0 }
+  { GPIOB, GPIO_Pin_7, GPIO_PinSource7, NONE, TIM4, TIM_Channel_2, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_6, GPIO_PinSource6, NONE, TIM4, TIM_Channel_1, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_5, GPIO_PinSource5, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_4, GPIO_PinSource4, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_3, GPIO_PinSource3, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_15, GPIO_PinSource15, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_14, GPIO_PinSource14, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_13, GPIO_PinSource13, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_8, GPIO_PinSource8, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_9, GPIO_PinSource9, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_0, GPIO_PinSource0, ADC_Channel_0, TIM2, TIM_Channel_1, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_1, GPIO_PinSource1, ADC_Channel_1, TIM2, TIM_Channel_2, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_4, GPIO_PinSource4, ADC_Channel_4, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_5, GPIO_PinSource5, ADC_Channel_5, NULL, NONE, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_6, GPIO_PinSource6, ADC_Channel_6, TIM3, TIM_Channel_1, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_7, GPIO_PinSource7, ADC_Channel_7, TIM3, TIM_Channel_2, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_0, GPIO_PinSource0, ADC_Channel_8, TIM3, TIM_Channel_3, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_1, GPIO_PinSource1, ADC_Channel_9, TIM3, TIM_Channel_4, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_3, GPIO_PinSource3, ADC_Channel_3, TIM2, TIM_Channel_4, PIN_MODE_NONE, 0, 0 },
+  { GPIOA, GPIO_Pin_2, GPIO_PinSource2, ADC_Channel_2, TIM2, TIM_Channel_3, PIN_MODE_NONE, 0, 0 },
+  { GPIOB, GPIO_Pin_2, GPIO_PinSource2, NONE, NULL, NONE, PIN_MODE_NONE, 0, 0 }
 };
 
 STM32_Pin_Info* HAL_Pin_Map() {
