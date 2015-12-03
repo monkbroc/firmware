@@ -77,9 +77,6 @@ void HAL_PWM_Write(uint16_t pin, uint8_t value)
 
     	// TIM enable counter
     	HAL_PWM_Enable_TIM(pin);
-
-    	// Set Duty Cycle
-    	HAL_PWM_Update_Duty_Cycle(pin, value);
     }
     else
     {
@@ -94,41 +91,16 @@ void HAL_PWM_Set_Frequency(uint16_t pin, uint16_t pwm_frequency) {
 
 uint16_t HAL_PWM_Get_Frequency(uint16_t pin)
 {
-    uint16_t TIM_ARR = 0;
-    uint16_t PWM_Frequency = 0;
-
-	// TODO: refactor this
     STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
-    if(pin_info->timer_peripheral == TIM1)
+    if(pin_info->timer_peripheral == NULL)
     {
-        TIM_ARR = pin_info->timer_peripheral->ARR;
-    }
-    else if(pin_info->timer_peripheral == TIM3)
-    {
-        TIM_ARR = pin_info->timer_peripheral->ARR;
-    }
-    else if(pin_info->timer_peripheral == TIM4)
-    {
-        TIM_ARR = pin_info->timer_peripheral->ARR;
-    }
-    else if(pin_info->timer_peripheral == TIM5)
-    {
-        TIM_ARR = pin_info->timer_peripheral->ARR;
-    }
-#if PLATFORM_ID == 10 // Electron
-    else if(pin_info->timer_peripheral == TIM8)
-    {
-        TIM_ARR = pin_info->timer_peripheral->ARR;
-    }
-#endif
-    else
-    {
-        return PWM_Frequency;
-    }
+        return 0;
+	}
 
 	uint32_t CLOCK_FREQ = HAL_PWM_Calculate_Prescaler(pin_info->pwm_frequency);
-    PWM_Frequency = (uint16_t)(TIM_PWM_COUNTER_CLOCK_FREQ / (TIM_ARR + 1));
+	uint16_t TIM_ARR = HAL_PWM_Get_ARR(pin);
+    uint16_t PWM_Frequency = (uint16_t)(CLOCK_FREQ / (TIM_ARR + 1));
 
     return PWM_Frequency;
 }
@@ -268,6 +240,7 @@ uint16_t HAL_PWM_Calculate_CCR(uint32_t TIM_CLK, uint16_t period, uint8_t value)
 
 uint32_t HAL_PWM_Calculate_Prescaler(uint16_t pwm_frequency)
 {
+    //  __builtin_clz is a GCC built-in function that counts the number of leading zeros
 	uint16_t leading_zeros = __builtin_clz(pwm_frequency);
 	uint16_t leading_zeros_default = __builtin_clz(TIM_PWM_FREQ);
 
