@@ -44,11 +44,12 @@
 
 void HAL_PWM_Enable_TIM_Clock(uint16_t pin, uint16_t pwm_frequency);
 uint32_t HAL_PWM_Calculate_Prescaled_Clock(uint16_t pwm_frequency);
-uint16_t HAL_PWM_Calculate_ARR(uint16_t TIM_Prescaled_Clock, uint16_t pwm_frequency);
-uint16_t HAL_PWM_Get_ARR(uint16_t pin);
-uint16_t HAL_PWM_Calculate_CCR(uint16_t period, uint8_t value);
+uint16_t HAL_PWM_Calculate_Period(uint16_t TIM_Prescaled_Clock, uint16_t pwm_frequency);
+uint16_t HAL_PWM_Get_Period(uint16_t pin);
+uint16_t HAL_PWM_Calculate_Pulse(uint16_t period, uint8_t value);
 uint32_t HAL_PWM_Base_Clock(uint16_t pin);
 uint16_t HAL_PWM_Calculate_Prescaler(uint32_t TIM_Clock, uint32_t TIM_Prescaled_Clock);
+TIM_TimeBaseInitTypeDef HAL_PWM_Calculate_Time_Base(uint16_t pin, uint16_t pwm_frequency);
 void HAL_PWM_Update_Disable_Event(uint16_t pin, int enabled);
 void HAL_PWM_Configure_TIM(uint16_t pin, uint8_t value);
 void HAL_PWM_Enable_TIM(uint16_t pin);
@@ -73,7 +74,7 @@ void HAL_PWM_Write(uint16_t pin, uint8_t value)
 
 void HAL_PWM_Write_With_Frequency(uint16_t pin, uint8_t value, uint16_t pwm_frequency)
 {
-	// TODO: What's would a user by setting a frequency of 0?
+	// TODO: What would a user by setting a frequency of 0?
 	if(pwm_frequency == 0)
 	{
 		return;
@@ -119,8 +120,8 @@ uint16_t HAL_PWM_Get_Frequency(uint16_t pin)
 	uint16_t TIM_Prescaler = TIM_GetPrescaler(pin_info->timer_peripheral);
 	uint32_t TIM_Prescaled_Clock = TIM_Clock / (TIM_Prescaler + 1);
 
-	uint16_t TIM_ARR = HAL_PWM_Get_ARR(pin);
-    uint16_t PWM_Frequency = (uint16_t)(TIM_Prescaled_Clock / (TIM_ARR + 1));
+	uint16_t TIM_Period = HAL_PWM_Get_Period(pin);
+    uint16_t PWM_Frequency = (uint16_t)(TIM_Prescaled_Clock / (TIM_Period + 1));
 
     return PWM_Frequency;
 }
@@ -128,35 +129,35 @@ uint16_t HAL_PWM_Get_Frequency(uint16_t pin)
 
 uint16_t HAL_PWM_Get_AnalogValue(uint16_t pin)
 {
-    uint16_t TIM_CCR = 0;
-    uint16_t TIM_ARR = 0;
+    uint16_t TIM_Pulse = 0;
+    uint16_t TIM_Period = 0;
     uint16_t PWM_AnalogValue = 0;
 
     STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
     if(pin_info->timer_ch == TIM_Channel_1)
     {
-        TIM_CCR = pin_info->timer_peripheral->CCR1;
+        TIM_Pulse = pin_info->timer_peripheral->CCR1;
     }
     else if(pin_info->timer_ch == TIM_Channel_2)
     {
-        TIM_CCR = pin_info->timer_peripheral->CCR2;
+        TIM_Pulse = pin_info->timer_peripheral->CCR2;
     }
     else if(pin_info->timer_ch == TIM_Channel_3)
     {
-        TIM_CCR = pin_info->timer_peripheral->CCR3;
+        TIM_Pulse = pin_info->timer_peripheral->CCR3;
     }
     else if(pin_info->timer_ch == TIM_Channel_4)
     {
-        TIM_CCR = pin_info->timer_peripheral->CCR4;
+        TIM_Pulse = pin_info->timer_peripheral->CCR4;
     }
     else
     {
         return PWM_AnalogValue;
     }
 
-    TIM_ARR = HAL_PWM_Get_ARR(pin);
-    PWM_AnalogValue = (uint16_t)(((TIM_CCR + 1) * 255) / (TIM_ARR + 1));
+    TIM_Period = HAL_PWM_Get_Period(pin);
+    PWM_AnalogValue = (uint16_t)(((TIM_Pulse + 1) * 255) / (TIM_Period + 1));
 
     return PWM_AnalogValue;
 }
@@ -190,7 +191,7 @@ uint32_t HAL_PWM_Calculate_Prescaled_Clock(uint16_t pwm_frequency)
 	else
 	{
 		// Decrease the clock frequency for lower PWM frequencies to
-		// avoid an overflow in the ARR calculation
+		// avoid an overflow in the Period calculation
 		return TIM_PWM_COUNTER_CLOCK_FREQ / (TIM_PWM_FREQ / pwm_frequency + 1);
 	}
 }
@@ -200,23 +201,41 @@ uint16_t HAL_PWM_Calculate_Prescaler(uint32_t TIM_Clock, uint32_t TIM_Prescaled_
 	return (uint16_t) (TIM_Clock / TIM_Prescaled_Clock) - 1;
 }
 
-uint16_t HAL_PWM_Calculate_ARR(uint16_t TIM_Prescaled_Clock, uint16_t pwm_frequency)
+uint16_t HAL_PWM_Calculate_Period(uint16_t TIM_Prescaled_Clock, uint16_t pwm_frequency)
 {
 	return (uint16_t) (TIM_Prescaled_Clock / pwm_frequency) - 1;
 }
 
-uint16_t HAL_PWM_Calculate_CCR(uint16_t period, uint8_t value)
+uint16_t HAL_PWM_Calculate_Pulse(uint16_t period, uint8_t value)
 {
-	// TIM Channel Duty Cycle(%) = (TIM_CCR / TIM_ARR + 1) * 100
-	uint16_t TIM_CCR = (uint16_t) (value * (period + 1) / 255);
+	// TIM Channel Duty Cycle(%) = (TIM_Pulse / TIM_Period + 1) * 100
+	uint16_t TIM_Pulse = (uint16_t) (value * (period + 1) / 255);
 
-	return TIM_CCR;
+	return TIM_Pulse;
 }
 
-uint16_t HAL_PWM_Get_ARR(uint16_t pin)
+uint16_t HAL_PWM_Get_Period(uint16_t pin)
 {
 	STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 	return pin_info->timer_peripheral->ARR;
+}
+
+TIM_TimeBaseInitTypeDef HAL_PWM_Calculate_Time_Base(uint16_t pin, uint16_t pwm_frequency)
+{
+	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = { 0 };
+
+	uint32_t TIM_Clock = HAL_PWM_Base_Clock(pin);
+	uint32_t TIM_Prescaled_Clock = HAL_PWM_Calculate_Prescaled_Clock(pwm_frequency);
+	uint16_t TIM_Prescaler = HAL_PWM_Calculate_Prescaler(TIM_Clock, TIM_Prescaled_Clock);
+	uint16_t TIM_Period = HAL_PWM_Calculate_Period(TIM_Prescaled_Clock, pwm_frequency);
+
+	// Time base configuration
+	TIM_TimeBaseStructure.TIM_Period = TIM_Period;
+	TIM_TimeBaseStructure.TIM_Prescaler = TIM_Prescaler;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+
+	return TIM_TimeBaseStructure;
 }
 
 void HAL_PWM_Enable_TIM_Clock(uint16_t pin, uint16_t pwm_frequency)
@@ -252,17 +271,8 @@ void HAL_PWM_Enable_TIM_Clock(uint16_t pin, uint16_t pwm_frequency)
 	}
 #endif
 
-	uint32_t TIM_Clock = HAL_PWM_Base_Clock(pin);
-	uint32_t TIM_Prescaled_Clock = HAL_PWM_Calculate_Prescaled_Clock(pwm_frequency);
-	uint16_t TIM_Prescaler = HAL_PWM_Calculate_Prescaler(TIM_Clock, TIM_Prescaled_Clock);
-	uint16_t TIM_ARR = HAL_PWM_Calculate_ARR(TIM_Prescaled_Clock, pwm_frequency);
-
 	// Time base configuration
-	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = { 0 };
-	TIM_TimeBaseStructure.TIM_Period = TIM_ARR;
-	TIM_TimeBaseStructure.TIM_Prescaler = TIM_Prescaler;
-	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = HAL_PWM_Calculate_Time_Base(pin, pwm_frequency);
 	TIM_TimeBaseInit(pin_info->timer_peripheral, &TIM_TimeBaseStructure);
 }
 
@@ -272,8 +282,8 @@ void HAL_PWM_Configure_TIM(uint16_t pin, uint8_t value)
 	STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
 	//PWM Duty Cycle
-	uint16_t TIM_ARR = HAL_PWM_Get_ARR(pin);
-	uint16_t TIM_CCR = HAL_PWM_Calculate_CCR(TIM_ARR, value);
+	uint16_t TIM_Period = HAL_PWM_Get_Period(pin);
+	uint16_t TIM_Pulse = HAL_PWM_Calculate_Pulse(TIM_Period, value);
 
 	// PWM1 Mode configuration
 	// Initialize all 8 struct params to 0, fixes randomly inverted RX, TX PWM
@@ -281,7 +291,7 @@ void HAL_PWM_Configure_TIM(uint16_t pin, uint8_t value)
 	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
 	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
 	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
-	TIM_OCInitStructure.TIM_Pulse = TIM_CCR;
+	TIM_OCInitStructure.TIM_Pulse = TIM_Pulse;
 
 	// Enable output-compare preload function.  Duty cycle will be updated
 	// at end of each counter cycle to prevent glitches.
@@ -337,11 +347,8 @@ void HAL_PWM_Update_DC_Frequency(uint16_t pin, uint16_t value, uint16_t pwm_freq
 	STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
 	// Calculate new prescaler, period and output compare register value
-	uint32_t TIM_Clock = HAL_PWM_Base_Clock(pin);
-	uint32_t TIM_Prescaled_Clock = HAL_PWM_Calculate_Prescaled_Clock(pwm_frequency);
-	uint16_t TIM_Prescaler = HAL_PWM_Calculate_Prescaler(TIM_Clock, TIM_Prescaled_Clock);
-	uint16_t TIM_ARR = HAL_PWM_Calculate_ARR(TIM_Prescaled_Clock, pwm_frequency);
-	uint16_t TIM_CCR = HAL_PWM_Calculate_CCR(TIM_ARR, value);
+	TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = HAL_PWM_Calculate_Time_Base(pin, pwm_frequency);
+	uint16_t TIM_Pulse = HAL_PWM_Calculate_Pulse(TIM_TimeBaseStructure.TIM_Period, value);
 
 	// Disable update events while updating registers
 	// In case a PWM period ends, it will keep the current values
@@ -349,17 +356,17 @@ void HAL_PWM_Update_DC_Frequency(uint16_t pin, uint16_t value, uint16_t pwm_freq
 
 	// Update output compare register value
 	if (pin_info->timer_ch == TIM_Channel_1) {
-		TIM_SetCompare1(pin_info->timer_peripheral, TIM_CCR);
+		TIM_SetCompare1(pin_info->timer_peripheral, TIM_Pulse);
 	} else if (pin_info->timer_ch == TIM_Channel_2) {
-		TIM_SetCompare2(pin_info->timer_peripheral, TIM_CCR);
+		TIM_SetCompare2(pin_info->timer_peripheral, TIM_Pulse);
 	} else if (pin_info->timer_ch == TIM_Channel_3) {
-		TIM_SetCompare3(pin_info->timer_peripheral, TIM_CCR);
+		TIM_SetCompare3(pin_info->timer_peripheral, TIM_Pulse);
 	} else if (pin_info->timer_ch == TIM_Channel_4) {
-		TIM_SetCompare4(pin_info->timer_peripheral, TIM_CCR);
+		TIM_SetCompare4(pin_info->timer_peripheral, TIM_Pulse);
 	}
 
-	TIM_SetAutoreload(pin_info->timer_peripheral, TIM_ARR);
-	TIM_PrescalerConfig(pin_info->timer_peripheral, TIM_Prescaler, TIM_PSCReloadMode_Update);
+	TIM_SetAutoreload(pin_info->timer_peripheral, TIM_TimeBaseStructure.TIM_Period);
+	TIM_PrescalerConfig(pin_info->timer_peripheral, TIM_TimeBaseStructure.TIM_Prescaler, TIM_PSCReloadMode_Update);
 
 	// Re-enable update events
 	// At the next update event (end of timer period) the preload
