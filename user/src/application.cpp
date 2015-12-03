@@ -3,9 +3,8 @@
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
 int updateFrequency(String value) {
-  HAL_PWM_Set_Frequency(A4, value.toInt());
-  pinMode(A4, OUTPUT);
-  analogWrite(A4, 50);
+  uint16_t freq = value.toInt();
+  analogWrite(A4, 50, freq);
   return HAL_PWM_Get_Frequency(A4);
 }
 
