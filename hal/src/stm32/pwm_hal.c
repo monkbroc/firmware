@@ -32,7 +32,11 @@
 
 /* Private define ------------------------------------------------------------*/
 
+#if PLATFORM_ID == 0 // Core
+#define TIM_PWM_COUNTER_CLOCK_FREQ 24000000 //TIM Counter clock = 24MHz
+#else
 #define TIM_PWM_COUNTER_CLOCK_FREQ 30000000 //TIM Counter clock = 30MHz
+#endif
 
 /* Private macro -------------------------------------------------------------*/
 
@@ -164,6 +168,9 @@ uint16_t HAL_PWM_Get_AnalogValue(uint16_t pin)
 
 uint32_t HAL_PWM_Base_Clock(uint16_t pin)
 {
+#if PLATFORM_ID == 0 // Core
+    return SystemCoreClock;
+#else
     STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
     if(pin_info->timer_peripheral == TIM3 ||
@@ -176,6 +183,7 @@ uint32_t HAL_PWM_Base_Clock(uint16_t pin)
     {
         return SystemCoreClock;
     }
+#endif
 }
 
 uint32_t HAL_PWM_Calculate_Prescaled_Clock(uint16_t pwm_frequency)
@@ -242,11 +250,36 @@ void HAL_PWM_Enable_TIM_Clock(uint16_t pin, uint16_t pwm_frequency)
 {
     STM32_Pin_Info* pin_info = HAL_Pin_Map() + pin;
 
-    // TIM clock enable
+	// AFIO and TIM clock enable
+
+#if PLATFORM_ID == 0 // Core
+
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+
+	if(pin_info->timer_peripheral == TIM2)
+	{
+		RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+	}
+	else if(pin_info->timer_peripheral == TIM3)
+	{
+		RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
+	}
+	else if(pin_info->timer_peripheral == TIM4)
+	{
+		RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+	}
+
+#else
+
     if (pin_info->timer_peripheral == TIM1)
     {
         GPIO_PinAFConfig(pin_info->gpio_peripheral, pin_info->gpio_pin_source, GPIO_AF_TIM1);
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM1, ENABLE);
+    }
+    else if (pin_info->timer_peripheral == TIM2)
+    {
+        GPIO_PinAFConfig(pin_info->gpio_peripheral, pin_info->gpio_pin_source, GPIO_AF_TIM2);
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
     }
     else if (pin_info->timer_peripheral == TIM3)
     {
@@ -269,6 +302,8 @@ void HAL_PWM_Enable_TIM_Clock(uint16_t pin, uint16_t pwm_frequency)
         GPIO_PinAFConfig(pin_info->gpio_peripheral, pin_info->gpio_pin_source, GPIO_AF_TIM8);
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM8, ENABLE);
     }
+#endif
+
 #endif
 
     // Time base configuration
