@@ -78,7 +78,6 @@ void HAL_PWM_Write(uint16_t pin, uint8_t value)
 
 void HAL_PWM_Write_With_Frequency(uint16_t pin, uint8_t value, uint16_t pwm_frequency)
 {
-    // TODO: What would a user by setting a frequency of 0?
     if(pwm_frequency == 0)
     {
         return;

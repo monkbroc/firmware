@@ -209,7 +209,8 @@ void analogWrite(pin_t pin, uint16_t value)
 
 
 /*
- * @brief Should take an integer 0-255 and create a PWM signal with a duty cycle from 0-100% and custom frequency.
+ * @brief Should take an integer 0-255 and create a PWM signal with a duty cycle from 0-100%
+ * and frequency from 1 to 65535 Hz.
  */
 void analogWrite(pin_t pin, uint16_t value, uint16_t pwm_frequency)
 {
