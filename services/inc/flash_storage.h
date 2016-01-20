@@ -98,8 +98,9 @@ public:
         return 0;
     }
 
-    int read(uint8_t* data, unsigned offset, unsigned size)
+    int read(void* _data, unsigned offset, unsigned size)
     {
+        uint8_t *data = (uint8_t *)_data;
         if (!isValidRange(offset,size))
             return FLASH_INVALID_RANGE;
 
