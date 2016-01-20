@@ -22,17 +22,28 @@
 
 #include <stddef.h>
 #include <cstring>
+#include <utility>
 #include "catch.hpp"
+
+// TODO: harmonize terminology: sector/page/block
+//                              offset/address
+// TODO: harmonize types: uintptr_t/uint32_t
 
 template <typename Store, uintptr_t Sector1, size_t Size1, uintptr_t Sector2, size_t Size2>
 class EEPROMEmulation
 {
 public:
-    struct BlockHeader {
-        static const uint16_t BLOCK_ERASED = 0xFFFF;
-        static const uint16_t BLOCK_VERIFIED = 0x0FFF;
-        static const uint16_t BLOCK_COPY = 0x00FF;
-        static const uint16_t BLOCK_ACTIVE = 0x0000;
+    using SectorSpan = std::pair<uintptr_t, size_t>;
+
+    static const size_t Capacity = std::min(Size1, Size2);
+
+    static const uint8_t FLASH_ERASED = 0xFF;
+
+    struct SectorHeader {
+        static const uint16_t ERASED = 0xFFFF;
+        static const uint16_t VERIFIED = 0x0FFF;
+        static const uint16_t COPY = 0x00FF;
+        static const uint16_t ACTIVE = 0x0000;
 
         uint16_t status;
     };
@@ -59,7 +70,7 @@ public:
         {
             if(length == sizeof(output))
             {
-                store.read(&output, data, sizeof(output));
+                store.read(data, &output, sizeof(output));
                 return true;
             }
         }
@@ -69,8 +80,13 @@ public:
     template <typename T>
     bool put(uint16_t id, const T& input)
     {
+        return writeRecord(getActiveSector(), id, &input, sizeof(input));
+    }
+
+    bool writeRecord(uint8_t sector, uint16_t id, const void *data, uint16_t length)
+    {
         bool written = false;
-        forEachRecord([&](uint32_t offset, const Header &header)
+        forEachRecord(sector, [&](uint32_t offset, const Header &header)
         {
             if(header.status == Header::EMPTY)
             {
@@ -78,14 +94,16 @@ public:
                 Header header = {
                     Header::INVALID,
                     id,
-                    sizeof(input)
+                    length
                 };
 
                 // Write header
-                store.write(offset, &header, sizeof(header));
+                uint32_t headerOffset = offset;
+                store.write(headerOffset, &header, sizeof(header));
 
                 // Write data
-                store.write(offset + sizeof(header), &input, sizeof(input));
+                uint32_t dataOffset = headerOffset + sizeof(header);
+                store.write(dataOffset, data, length);
 
                 // Write final valid status
                 header.status = Header::VALID;
@@ -93,22 +111,34 @@ public:
 
                 written = true;
             }
-            // TODO page swap when full
+            // TODO sector swap when full
         });
 
         return written;
     }
 
-    uint8_t getActivePage()
+    uint8_t getActiveSector()
     {
         // TODO
         return 1;
     }
 
+    uint8_t getAlternateSector()
+    {
+        switch(getActiveSector())
+        {
+            case 1:
+                return 2;
+            default:
+                return 1;
+        }
+    }
+
+
     bool findRecord(uint16_t id, uint16_t &length, uintptr_t &data)
     {
         bool found = false;
-        forEachRecord([&](uint32_t offset, const Header &header)
+        forEachRecord(getActiveSector(), [&](uint32_t offset, const Header &header)
         {
             if(header.id == id)
             {
@@ -121,34 +151,20 @@ public:
     }
 
     template <typename Func>
-    void forEachRecord(Func f)
+    void forEachRecord(uint8_t sector, Func f)
     {
-        uint32_t currentAddress;
-        uint32_t lastAddress;
+        SectorSpan span = getSectorSpan(sector);
+        uint32_t currentAddress = span.first;
+        uint32_t lastAddress = span.second;
 
-        switch(getActivePage())
-        {
-            case 1:
-                currentAddress = Sector1;
-                lastAddress = Sector1 + Size1;
-                break;
-            case 2:
-                currentAddress = Sector2;
-                lastAddress = Sector2 + Size2;
-                break;
-            default:
-                // TODO: what's the correct error behavior?
-                return;
-        }
-
-        // Skip block header
-        currentAddress += sizeof(BlockHeader);
+        // Skip sector header
+        currentAddress += sizeof(SectorHeader);
 
         // Walk through record list
         while(currentAddress < lastAddress)
         {
             Header header;
-            store.read(&header, currentAddress, sizeof(Header));
+            store.read(currentAddress, &header, sizeof(Header));
             f(currentAddress, header);
 
             // End of data
@@ -168,6 +184,97 @@ public:
             //WARN("Skipping header " << sizeof(header));
             currentAddress += sizeof(header);
         }
+    }
+   
+    SectorSpan getSectorSpan(uint8_t sector)
+    {
+        switch(sector)
+        {
+            case 1:
+                return SectorSpan { Sector1, Sector1 + Size1 };
+            case 2:
+                return SectorSpan { Sector2, Sector2 + Size2 };
+            default:
+                // TODO: what's the correct error behavior?
+                return SectorSpan { };
+        }
+    }
+
+    // Verify that the entire sector is erased to protect against resets
+    // during sector erase
+    bool verifySector(uint8_t sector)
+    {
+        SectorSpan span = getSectorSpan(sector);
+
+        SectorHeader header;
+        store.read(span.first, &header, sizeof(header));
+
+        if(header.status == SectorHeader::VERIFIED)
+        {
+            return true;
+        }
+
+        for(uintptr_t offset = span.first; offset < span.second; offset++)
+        {
+            if(*store.dataAt(offset) != FLASH_ERASED)
+            {
+                return false;
+            }
+        }
+        
+        header.status = SectorHeader::VERIFIED;
+        store.write(span.first, &header, sizeof(header));
+        return true;
+    }
+
+    void eraseSector(uint8_t sector)
+    {
+        SectorSpan span = getSectorSpan(sector);
+        store.eraseSector(span.first);
+    }
+
+    bool swapSectors()
+    {
+        uint8_t activeSector = getActiveSector();
+        uint8_t alternateSector = getAlternateSector();
+
+        if(!verifySector(alternateSector))
+        {
+            eraseSector(alternateSector);
+        }
+
+        return false;
+    }
+
+    void copyAllRecordsToSector(uint8_t fromSector, uint8_t toSector, int32_t exceptRecordId = -1)
+    {
+        uint16_t currentLength = 0;
+        const void *currentData = nullptr;
+        uint16_t currentId;
+        int32_t lastId = -1;
+        bool newRecordFound;
+
+        do
+        {
+            newRecordFound = false;
+            currentId = UINT16_MAX;
+            forEachRecord(fromSector, [&](uint32_t offset, const Header &header)
+            {
+                if(header.status == Header::VALID && header.id <= currentId && (int32_t)header.id > lastId && (int32_t)header.id != exceptRecordId)
+                {
+                    currentId = header.id;
+                    currentLength = header.length;
+                    currentData = store.dataAt(offset + sizeof(header));
+                    newRecordFound = true;
+                }
+            });
+
+            if(newRecordFound)
+            {
+                writeRecord(toSector, currentId, currentData, currentLength);
+                lastId = currentId;
+            }
+        } while(newRecordFound);
     }
 
     Store store;

@@ -13,114 +13,132 @@ const int TestBase = 0xC000;
 using TestStore = RAMFlashStorage<TestBase, TestSectorCount, TestSectorSize>;
 using TestEEPROM = EEPROMEmulation<TestStore, TestBase, TestSectorSize, TestBase + TestSectorSize, TestSectorSize>;
 
-// Interrupted write 1: status written as invalid, but id, length, data
-// not written
-template <typename T>
-uintptr_t writeInvalidRecord(TestStore &store, uintptr_t offset, uint16_t id, const T& record)
+// Decorator class for RAMFlashStorage to pre-write EEPROM records or
+// validate written records
+class StoreManipulator
 {
-    uint16_t status = TestEEPROM::Header::INVALID;
-    store.write(offset, &status, sizeof(status));
-    // Next record should be written directly after the invalid header
-    return offset + sizeof(TestEEPROM::Header);
-}
+public:
+    StoreManipulator(TestStore &store) : store(store)
+    {
+    }
 
-// Interrupted write 2: status written as invalid, id, length written, but data
-// not written
-template <typename T>
-uintptr_t writeRecordHeader(TestStore &store, uintptr_t offset, uint16_t id, const T& record)
-{
-    TestEEPROM::Header header = {
-        TestEEPROM::Header::INVALID,
-        id,
-        sizeof(record)
-    };
+    TestStore &store;
 
-    store.write(offset, &header, sizeof(header));
-    // Next record should be written after the invalid header and partial data
-    return offset + sizeof(header) + sizeof(record);
-}
+    void eraseAll()
+    {
+        store.eraseSector(TestBase);
+        store.eraseSector(TestBase + TestSectorSize);
+    }
 
-// Interrupted write 3: status written as invalid, id, length written, data
-// partially written
-template <typename T>
-uintptr_t writePartialRecord(TestStore &store, uintptr_t offset, uint16_t id, const T& record)
-{
-    TestEEPROM::Header header = {
-        TestEEPROM::Header::INVALID,
-        id,
-        sizeof(record)
-    };
+    // Interrupted record write 1: status written as invalid, but id,
+    // length, data not written
+    template <typename T>
+    uintptr_t writeInvalidRecord(uintptr_t offset, uint16_t id, const T& record)
+    {
+        uint16_t status = TestEEPROM::Header::INVALID;
+        store.write(offset, &status, sizeof(status));
+        // Next record should be written directly after the invalid header
+        return offset + sizeof(TestEEPROM::Header);
+    }
 
-    store.write(offset, &header, sizeof(header));
-    offset += sizeof(header);
-    // write only 1 byte
-    store.write(offset, &record, 1);
+    // Interrupted record write 2: status written as invalid, id, length
+    // written, but data not written
+    template <typename T>
+    uintptr_t writeRecordHeader(uintptr_t offset, uint16_t id, const T& record)
+    {
+        TestEEPROM::Header header = {
+            TestEEPROM::Header::INVALID,
+            id,
+            sizeof(record)
+        };
 
-    // Next record should be written after the invalid header and partial data
-    return offset + sizeof(record);
-}
+        store.write(offset, &header, sizeof(header));
+        // Next record should be written after the invalid header and partial data
+        return offset + sizeof(header) + sizeof(record);
+    }
 
-template <typename T>
-uintptr_t writeRecord(TestStore &store, uintptr_t offset, uint16_t id, const T& record)
-{
-    TestEEPROM::Header header = {
-        TestEEPROM::Header::VALID,
-        id,
-        sizeof(record)
-    };
+    // Interrupted record write 3: status written as invalid, id, length
+    // written, data partially written
+    template <typename T>
+    uintptr_t writePartialRecord(uintptr_t offset, uint16_t id, const T& record)
+    {
+        TestEEPROM::Header header = {
+            TestEEPROM::Header::INVALID,
+            id,
+            sizeof(record)
+        };
 
-    store.write(offset, &header, sizeof(header));
-    offset += sizeof(header);
-    store.write(offset, &record, sizeof(record));
+        store.write(offset, &header, sizeof(header));
+        offset += sizeof(header);
+        // write only 1 byte
+        store.write(offset, &record, 1);
 
-    // Next record should be written after the header and data
-    return offset + sizeof(record);
-}
+        // Next record should be written after the invalid header and partial data
+        return offset + sizeof(record);
+    }
 
-template <typename T>
-void readValidRecord(TestStore &store, uintptr_t offset, uint16_t expectedId, const T& expected)
-{
-    uint16_t status;
-    uint16_t expectedStatus = TestEEPROM::Header::VALID;
-    store.read(&status, offset, sizeof(status));
-    offset += sizeof(status);
-    REQUIRE(status == expectedStatus);
+    // Completely written record
+    template <typename T>
+    uintptr_t writeRecord(uintptr_t offset, uint16_t id, const T& record)
+    {
+        TestEEPROM::Header header = {
+            TestEEPROM::Header::VALID,
+            id,
+            sizeof(record)
+        };
 
-    uint16_t id;
-    store.read(&id, offset, sizeof(id));
-    offset += sizeof(id);
-    REQUIRE(id == expectedId);
+        store.write(offset, &header, sizeof(header));
+        offset += sizeof(header);
+        store.write(offset, &record, sizeof(record));
 
-    uint16_t length;
-    store.read(&length, offset, sizeof(length));
-    offset += sizeof(length);
-    REQUIRE(length == sizeof(expected));
+        // Next record should be written after the header and data
+        return offset + sizeof(record);
+    }
 
-    T value;
-    store.read(&value, offset, sizeof(expected));
-    offset += sizeof(expected);
-    REQUIRE(value == expected);
-}
+    // Validates that a specific record was correctly written at the specified offset
+    template <typename T>
+    uintptr_t requireValidRecord(uintptr_t offset, uint16_t id, const T& expected)
+    {
+        uint16_t status = TestEEPROM::Header::VALID;
+        REQUIRE(std::memcmp(store.dataAt(offset), &status, sizeof(status)) == 0);
+        offset += sizeof(status);
 
-// Display helper for Header struct
-std::ostream& operator << ( std::ostream& os, TestEEPROM::Header const& value ) {
-    std::stringstream ss;
-    ss << "Header" << std::hex <<
-        " status=0x" << value.status <<
-        " id=0x" << value.id <<
-        " length=0x" << value.length;
-    os << ss.str();
-    return os;
-}
+        REQUIRE(std::memcmp(store.dataAt(offset), &id, sizeof(id)) == 0);
+        offset += sizeof(id);
 
+        uint16_t length = sizeof(expected);
+        REQUIRE(std::memcmp(store.dataAt(offset), &length, sizeof(length)) == 0);
+        offset += sizeof(length);
+
+        REQUIRE(std::memcmp(store.dataAt(offset), &expected, sizeof(expected)) == 0);
+        return offset + sizeof(expected);
+    }
+
+    // Test debugging helper to view the storage contents
+    // Usage:
+    // WARN(store.dumpStorage(TestBase, 30));
+    std::string dumpStorage(uintptr_t offset, uint16_t length)
+    {
+        std::stringstream ss;
+        const uint8_t *begin = store.dataAt(offset);
+        const uint8_t *end = &begin[length];
+
+        ss << std::hex << offset << ": ";
+        while(begin < end)
+        {
+            ss << std::hex << std::setw(2) << std::setfill('0');
+            ss << (int)*begin++ << " ";
+        }
+        return ss.str();
+    }
+};
 
 TEST_CASE("Get record", "[eeprom]")
 {
     TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
 
-    // Start with erased flash
-    eeprom.store.eraseSector(TestBase);
-    eeprom.store.eraseSector(TestBase + TestSectorSize);
+    store.eraseAll();
     uint32_t offset = TestBase + 2;
 
     SECTION("The record doesn't exist")
@@ -139,9 +157,9 @@ TEST_CASE("Get record", "[eeprom]")
         SECTION("With bad records")
         {
             uint8_t badRecord[] = { 0xCC, 0xDD };
-            offset = writeInvalidRecord(eeprom.store, offset, recordId, badRecord);
-            offset = writeRecordHeader(eeprom.store, offset, recordId, badRecord);
-            offset = writePartialRecord(eeprom.store, offset, recordId, badRecord);
+            offset = store.writeInvalidRecord(offset, recordId, badRecord);
+            offset = store.writeRecordHeader(offset, recordId, badRecord);
+            offset = store.writePartialRecord(offset, recordId, badRecord);
 
             THEN("get returns false")
             {
@@ -158,30 +176,30 @@ TEST_CASE("Get record", "[eeprom]")
 
         SECTION("No other records")
         {
-            offset = writeRecord(eeprom.store, offset, recordId, record);
+            offset = store.writeRecord(offset, recordId, record);
 
             THEN("get returns true and extracts the value")
             {
                 uint8_t value;
                 REQUIRE(eeprom.get(recordId, value) == true);
-                REQUIRE(value == record);
+                REQUIRE(value == 0xCC);
             }
         }
 
         SECTION("With bad records")
         {
             uint8_t badRecord[] = { 0xCC, 0xDD };
-            offset = writeInvalidRecord(eeprom.store, offset, recordId, badRecord);
-            offset = writeRecordHeader(eeprom.store, offset, recordId, badRecord);
-            offset = writePartialRecord(eeprom.store, offset, recordId, badRecord);
+            offset = store.writeInvalidRecord(offset, recordId, badRecord);
+            offset = store.writeRecordHeader(offset, recordId, badRecord);
+            offset = store.writePartialRecord(offset, recordId, badRecord);
 
-            offset = writeRecord(eeprom.store, offset, recordId, record);
+            offset = store.writeRecord(offset, recordId, record);
 
             THEN("get returns true and extracts the value")
             {
                 uint8_t value;
                 REQUIRE(eeprom.get(recordId, value) == true);
-                REQUIRE(value == record);
+                REQUIRE(value == 0xCC);
             }
         }
     }
@@ -190,10 +208,9 @@ TEST_CASE("Get record", "[eeprom]")
 TEST_CASE("Put record", "[eeprom]")
 {
     TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
 
-    // Start with erased flash
-    eeprom.store.eraseSector(TestBase);
-    eeprom.store.eraseSector(TestBase + TestSectorSize);
+    store.eraseAll();
     uint32_t offset = TestBase + 2;
 
     SECTION("The record doesn't exist")
@@ -204,204 +221,148 @@ TEST_CASE("Put record", "[eeprom]")
         THEN("put returns true and creates the record")
         {
             REQUIRE(eeprom.put(recordId, record) == true);
-            readValidRecord(eeprom.store, offset, recordId, record);
+            store.requireValidRecord(offset, recordId, record);
+        }
+
+        THEN("get returns the put record")
+        {
+            eeprom.put(recordId, record);
+            uint8_t newRecord;
+            REQUIRE(eeprom.get(recordId, newRecord) == true);
+            REQUIRE(newRecord == 0xDD);
         }
     }
 
-    //SECTION("The record exists")
-    //{
-    //    uint16_t recordId = 0;
-    //    uint8_t record = 0xCC;
+    SECTION("The record exists")
+    {
+        uint16_t recordId = 0;
+        uint8_t previousRecord = 0xCC;
 
-    //    SECTION("No other records")
-    //    {
-    //        offset = writeRecord(eeprom.store, offset, recordId, record);
+        offset = store.writeRecord(offset, recordId, previousRecord);
 
-    //        THEN("get returns true and extracts the value")
-    //        {
-    //            uint8_t value;
-    //            REQUIRE(eeprom.get(recordId, value) == true);
-    //            REQUIRE(value == record);
-    //        }
-    //    }
+        uint8_t record = 0xDD;
 
-    //    SECTION("With bad records")
-    //    {
-    //        uint8_t badRecord[] = { 0xCC, 0xDD };
-    //        offset = writeInvalidRecord(eeprom.store, offset, recordId, badRecord);
-    //        offset = writeRecordHeader(eeprom.store, offset, recordId, badRecord);
-    //        offset = writePartialRecord(eeprom.store, offset, recordId, badRecord);
+        THEN("put returns true and creates a new copy of the record")
+        {
+            REQUIRE(eeprom.put(recordId, record) == true);
+            store.requireValidRecord(offset, recordId, record);
+        }
 
-    //        offset = writeRecord(eeprom.store, offset, recordId, record);
-
-    //        THEN("get returns true and extracts the value")
-    //        {
-    //            uint8_t value;
-    //            REQUIRE(eeprom.get(recordId, value) == true);
-    //            REQUIRE(value == record);
-    //        }
-    //    }
-    //}
+        THEN("get returns the put record")
+        {
+            eeprom.put(recordId, record);
+            uint8_t newRecord;
+            REQUIRE(eeprom.get(recordId, newRecord) == true);
+            REQUIRE(newRecord == 0xDD);
+        }
+    }
 }
 
-//SCENARIO("RAMFlashStore is initially random", "[ramflash]")
-//{
-//    TestStore store;
-//    int fingerprint = sum(store, TestBase, TestSectorSize*TestSectorCount);
-//    REQUIRE(fingerprint != 0);      // not all 0's
-//    REQUIRE(fingerprint != (TestSectorSize*TestSectorCount)*0xFF);
-//}
-//
-//SCENARIO("RAMFlashStore can be erased","[ramflash]")
-//{
-//    TestStore store;
-//    REQUIRE_FALSE(store.eraseSector(TestBase+100+TestSectorSize));
-//
-//    const uint8_t* data = store.dataAt(TestBase+TestSectorSize);
-//    for (unsigned i=0; i<TestSectorSize; i++) {
-//        CAPTURE(i);
-//        CHECK(data[i] == 0xFF);
-//    }
-//
-//    int fingerprint = sum(store, TestBase+TestSectorSize, TestSectorSize);   // 2nd sector
-//    REQUIRE(fingerprint != 0);      // not all 0's
-//    REQUIRE(fingerprint == (TestSectorSize)*0xFF);
-//}
-//
-//SCENARIO("RAMFlashStore can store data", "[ramflash]")
-//{
-//    TestStore store;
-//    REQUIRE_FALSE(store.eraseSector(TestBase));
-//    REQUIRE_FALSE(store.write(TestBase+3, (const uint8_t*)"batman", 7));
-//
-//    const char* expected = "\xFF\xFF\xFF" "batman" "\x00\xFF\xFF";
-//    const char* actual = (const char*)store.dataAt(TestBase);
-//    REQUIRE(string(actual,12) == string(expected,12));
-//}
-//
-//SCENARIO("RAMFlashStore emulates NAND flash", "[ramflash]")
-//{
-//    TestStore store;
-//    REQUIRE_FALSE(store.eraseSector(TestBase));
-//    REQUIRE_FALSE(store.write(TestBase+3, (const uint8_t*)"batman", 7));
-//    REQUIRE_FALSE(store.write(TestBase+0, (const uint8_t*)"\xA8\xFF\x00", 3));
-//
-//    const char* actual = (const char*)store.dataAt(TestBase);
-//
-//    const char* expected = "\xA8\xFF\x00" "batman" "\x00\xFF\xFF";
-//    REQUIRE(string(actual,12) == string(expected,12));
-//
-//    // no change to flash storage
-//    REQUIRE_FALSE(store.write(TestBase, (const uint8_t*)"\xF7\x80\x00\xFF", 3));
-//    expected = "\xA0\x80\0batman\x00\xFF\xFF";
-//    REQUIRE(string(actual,12) == string(expected,12));
-//}
-//
-//
-//// DCD Tests
-//
-//
-//SCENARIO("DCD initialized returns 0xFF", "[dcd]")
-//{
-//    TestDCD dcd;
-//
-//    const uint8_t* data = dcd.read(0);
-//    for (unsigned i=0; i<dcd.Length; i++)
-//    {
-//        CAPTURE( i );
-//        REQUIRE(data[i] == 0xFFu);
-//    }
-//}
-//
-//SCENARIO("DCD Length is SectorSize minus 8", "[dcd]")
-//{
-//    TestDCD dcd;
-//    REQUIRE(dcd.Length == TestSectorSize-8);
-//}
-//
-//SCENARIO("DCD can save data", "[dcd]")
-//{
-//    TestDCD dcd;
-//
-//    uint8_t expected[dcd.Length];
-//    memset(expected, 0xFF, sizeof(expected));
-//    memcpy(expected+23, "batman", 6);
-//
-//    REQUIRE_FALSE(dcd.write(23, "batman", 6));
-//
-//    const uint8_t* data = dcd.read(0);
-//    assertMemoryEqual(data, expected, dcd.Length);
-//}
-//
-//SCENARIO("DCD can write whole sector", "[dcd]")
-//{
-//    TestDCD dcd;
-//
-//    uint8_t expected[dcd.Length];
-//    for (unsigned i=0; i<dcd.Length; i++)
-//        expected[i] = rand();
-//
-//    dcd.write(0, expected, dcd.Length);
-//    const uint8_t* data = dcd.read(0);
-//    assertMemoryEqual(data, expected, dcd.Length);
-//}
-//
-//SCENARIO("DCD can overwrite data", "[dcd]")
-//{
-//    TestDCD dcd;
-//
-//    uint8_t expected[dcd.Length];
-//    for (unsigned i=0; i<dcd.Length; i++)
-//        expected[i] = 0xFF;
-//    memmove(expected+23, "bbatman", 7);
-//
-//    // overwrite data swapping a b to an a and vice versa
-//    REQUIRE_FALSE(dcd.write(23, "batman", 6));
-//    REQUIRE_FALSE(dcd.write(24, "batman", 6));
-//
-//    const uint8_t* data = dcd.read(0);
-//    assertMemoryEqual(data, expected, dcd.Length);
-//}
-//
-//SCENARIO("DCD uses 2nd sector if both are valid", "[dcd]")
-//{
-//    TestDCD dcd;
-//    TestStore& store = dcd.store;
-//
-//    TestDCD::Header header;
-//    header.make_valid();
-//
-//    // directly manipulate the flash to create desired state
-//    store.eraseSector(TestBase);
-//    store.eraseSector(TestBase+TestSectorSize);
-//    store.write(TestBase, &header, sizeof(header));
-//    store.write(TestBase+sizeof(header), "abcd", 4);
-//    store.write(TestBase+TestSectorSize, &header, sizeof(header));
-//    store.write(TestBase+TestSectorSize+sizeof(header), "1234", 4);
-//
-//    const uint8_t* result = dcd.read(0);
-//    assertMemoryEqual(result, (const uint8_t*)"1234", 4);
-//}
-//
-//
-//SCENARIO("DCD write is atomic if partial failure", "[dcd]")
-//{
-//    for (int write_count=1; write_count<5; write_count++)
-//    {
-//        TestDCD dcd;
-//        REQUIRE_FALSE(dcd.write(23, "abcdef", 6));
-//        REQUIRE_FALSE(dcd.write(23, "batman", 6));
-//
-//        assertMemoryEqual(dcd.read(23), (const uint8_t*)"batman", 6);
-//
-//        // mock a power failure after a certain number of writes
-//        dcd.store.setWriteCount(write_count);
-//        CAPTURE(write_count);
-//
-//        // write should fail
-//        REQUIRE(dcd.write(23, "7890-!", 6));
-//
-//        // last write is unsuccessful
-//        assertMemoryEqual(dcd.read(23), (const uint8_t*)"batman", 6);
-//    }
-//}
+TEST_CASE("Verify sector", "[eeprom]")
+{
+    TestEEPROM eeprom;
+
+    SECTION("random flash")
+    {
+        REQUIRE(eeprom.verifySector(1) == false);
+    }
+
+    SECTION("verified flash")
+    {
+        eeprom.store.eraseSector(TestBase);
+
+        uint16_t status = TestEEPROM::SectorHeader::VERIFIED;
+        eeprom.store.write(TestBase, &status, sizeof(status));
+
+        REQUIRE(eeprom.verifySector(1) == true);
+    }
+
+
+    SECTION("erased flash")
+    {
+        eeprom.store.eraseSector(TestBase);
+        REQUIRE(eeprom.verifySector(1) == true);
+
+        uint16_t status = TestEEPROM::SectorHeader::VERIFIED;
+        REQUIRE(std::memcmp(eeprom.store.dataAt(TestBase), &status, sizeof(status)) == 0);
+    }
+
+    SECTION("partially erased flash")
+    {
+        eeprom.store.eraseSector(TestBase);
+        uint8_t garbage = 0xCC;
+        eeprom.store.write(TestBase + 100, &garbage, sizeof(garbage));
+        REQUIRE(eeprom.verifySector(1) == false);
+    }
+}
+
+TEST_CASE("Alternate sector", "[eeprom]")
+{
+    // TODO
+
+}
+
+TEST_CASE("Copy records to sector", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    // Start with erased flash
+    eeprom.store.eraseSector(TestBase);
+    eeprom.store.eraseSector(TestBase + TestSectorSize);
+
+    uint32_t fromOffset = TestBase + 2;
+    uint32_t toOffset = TestBase + TestSectorSize + 2;
+    uint8_t fromSector = 1;
+    uint8_t toSector = 2;
+
+    SECTION("Single record")
+    {
+        uint16_t recordId = 100;
+        uint8_t record = 0xBB;
+        fromOffset = store.writeRecord(fromOffset, recordId, record);
+
+        eeprom.copyAllRecordsToSector(fromSector, toSector);
+
+        THEN("The record is copied")
+        {
+            store.requireValidRecord(toOffset, recordId, record);
+        }
+    }
+
+    SECTION("Multiple copies of a record")
+    {
+        uint16_t recordId = 100;
+        uint8_t record = 0xBB;
+        fromOffset = store.writeRecord(fromOffset, recordId, record);
+
+        uint8_t newRecord = 0xCC;
+        fromOffset = store.writeRecord(fromOffset, recordId, newRecord);
+
+        eeprom.copyAllRecordsToSector(fromSector, toSector);
+
+        THEN("The latest record is copied")
+        {
+            store.requireValidRecord(toOffset, recordId, newRecord);
+        }
+    }
+
+    SECTION("Multiple records")
+    {
+        uint16_t recordIds[] = { 30, 10, 40 };
+        uint32_t record = 0xDEADBEEF;
+
+        fromOffset = store.writeRecord(fromOffset, recordIds[0], record);
+        fromOffset = store.writeRecord(fromOffset, recordIds[1], record);
+        fromOffset = store.writeRecord(fromOffset, recordIds[2], record);
+
+        eeprom.copyAllRecordsToSector(fromSector, toSector);
+
+        THEN("The records are copied from small ids to large ids")
+        {
+            toOffset = store.requireValidRecord(toOffset, recordIds[1], record);
+            toOffset = store.requireValidRecord(toOffset, recordIds[0], record);
+            toOffset = store.requireValidRecord(toOffset, recordIds[2], record);
+        }
+    }
+}

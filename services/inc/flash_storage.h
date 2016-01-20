@@ -26,7 +26,7 @@ class FlashStorage
 public:
     int eraseSector(unsigned address);
     int write(unsigned offset, const uint8_t* data, unsigned size);
-    int read(uint8_t* data, unsigned offset, unsigned size);
+    int read(unsigned offset, uint8_t* data, unsigned size);
 
     const uint8_t* dataAt(unsigned address);
 };
@@ -98,7 +98,7 @@ public:
         return 0;
     }
 
-    int read(void* _data, unsigned offset, unsigned size)
+    int read(unsigned offset, void* _data, unsigned size)
     {
         uint8_t *data = (uint8_t *)_data;
         if (!isValidRange(offset,size))

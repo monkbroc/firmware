@@ -69,6 +69,12 @@ public:
     {
         return (const uint8_t*)address;
     }
+
+    int read(unsigned offset, uint8_t* data, unsigned size)
+    {
+        memcpy(data, dataAt(offset), size);
+        return 0;
+    }
 };
 
 template <typename Store, unsigned sectorSize, unsigned DCD1, unsigned DCD2>
