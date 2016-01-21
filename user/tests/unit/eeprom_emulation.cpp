@@ -6,7 +6,7 @@
 #include "eeprom_emulation.h"
 #include "flash_storage.h"
 
-const int TestSectorSize = 16000;
+const int TestSectorSize = 0x4000;
 const int TestSectorCount = 2;
 const int TestBase = 0xC000;
 
@@ -28,6 +28,23 @@ public:
     {
         store.eraseSector(TestBase);
         store.eraseSector(TestBase + TestSectorSize);
+    }
+
+    void writeSectorStatus(uintptr_t offset, uint16_t status)
+    {
+        store.write(offset, &status, sizeof(status));
+    }
+
+    uint16_t readSectorStatus(uintptr_t offset)
+    {
+        uint16_t status;
+        store.read(offset, &status, sizeof(status));
+        return status;
+    }
+
+    void requireSectorStatus(uintptr_t offset, uint16_t expectedStatus)
+    {
+        REQUIRE(readSectorStatus(offset) == expectedStatus);
     }
 
     // Interrupted record write 1: status written as invalid, but id,
@@ -139,6 +156,8 @@ TEST_CASE("Get record", "[eeprom]")
     StoreManipulator store(eeprom.store);
 
     store.eraseAll();
+    store.writeSectorStatus(TestBase, TestEEPROM::SectorHeader::ACTIVE);
+
     uint32_t offset = TestBase + 2;
 
     SECTION("The record doesn't exist")
@@ -211,6 +230,8 @@ TEST_CASE("Put record", "[eeprom]")
     StoreManipulator store(eeprom.store);
 
     store.eraseAll();
+    store.writeSectorStatus(TestBase, TestEEPROM::SectorHeader::ACTIVE);
+
     uint32_t offset = TestBase + 2;
 
     SECTION("The record doesn't exist")
@@ -261,38 +282,118 @@ TEST_CASE("Put record", "[eeprom]")
 TEST_CASE("Verify sector", "[eeprom]")
 {
     TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+    auto sector = TestEEPROM::LogicalSector::Sector1;
 
     SECTION("random flash")
     {
-        REQUIRE(eeprom.verifySector(1) == false);
+        REQUIRE(eeprom.verifySector(sector) == false);
     }
-
-    SECTION("verified flash")
-    {
-        eeprom.store.eraseSector(TestBase);
-
-        uint16_t status = TestEEPROM::SectorHeader::VERIFIED;
-        eeprom.store.write(TestBase, &status, sizeof(status));
-
-        REQUIRE(eeprom.verifySector(1) == true);
-    }
-
 
     SECTION("erased flash")
     {
         eeprom.store.eraseSector(TestBase);
-        REQUIRE(eeprom.verifySector(1) == true);
-
-        uint16_t status = TestEEPROM::SectorHeader::VERIFIED;
-        REQUIRE(std::memcmp(eeprom.store.dataAt(TestBase), &status, sizeof(status)) == 0);
+        REQUIRE(eeprom.verifySector(sector) == true);
     }
 
     SECTION("partially erased flash")
     {
         eeprom.store.eraseSector(TestBase);
+
         uint8_t garbage = 0xCC;
         eeprom.store.write(TestBase + 100, &garbage, sizeof(garbage));
-        REQUIRE(eeprom.verifySector(1) == false);
+
+        REQUIRE(eeprom.verifySector(sector) == false);
+    }
+}
+
+TEST_CASE("Active sector", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    store.eraseAll();
+
+    auto None = TestEEPROM::LogicalSector::None;
+    auto Sector1 = TestEEPROM::LogicalSector::Sector1;
+    auto Sector2 = TestEEPROM::LogicalSector::Sector2;
+    uint32_t sector1Offset = TestBase;
+    uint32_t sector2Offset = TestBase + TestSectorSize;
+
+    // No valid sector
+
+    SECTION("Sector 1 erased, sector 2 erased (blank flash)")
+    {
+        REQUIRE(eeprom.getActiveSector() == None);
+    }
+
+    SECTION("Sector 1 garbage, sector 2 garbage (invalid state)")
+    {
+        store.writeSectorStatus(sector1Offset, 999);
+        store.writeSectorStatus(sector2Offset, 999);
+        REQUIRE(eeprom.getActiveSector() == None);
+    }
+
+    // Sector 1 valid
+
+    SECTION("Sector 1 active, sector 2 erased (normal case)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::ACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+    }
+
+    // Steps of swap from sector 1 to sector 2
+
+    SECTION("Sector 1 active, sector 2 copy (interrupted swap)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::ACTIVE);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::COPY);
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+    }
+
+    SECTION("Sector 1 inactive, sector 2 copy (almost completed swap)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::INACTIVE);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::COPY);
+        REQUIRE(eeprom.getActiveSector() == Sector2);
+    }
+
+    SECTION("Sector 1 active, sector 2 inactive (completed swap, pending erase)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::ACTIVE);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::INACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+    }
+
+    // Sector 2 valid
+
+    SECTION("Sector 1 erased, sector 2 active (normal case)")
+    {
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::ACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector2);
+    }
+
+    // Steps of swap from sector 2 to sector 1
+
+    SECTION("Sector 1 copy, sector 2 active (interrupted swap)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::COPY);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::ACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector2);
+    }
+
+    SECTION("Sector 1 copy, sector 2 inactive (almost completed swap)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::COPY);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::INACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+    }
+
+    SECTION("Sector 1 inactive, sector 2 active (completed swap, pending erase)")
+    {
+        store.writeSectorStatus(sector1Offset, TestEEPROM::SectorHeader::INACTIVE);
+        store.writeSectorStatus(sector2Offset, TestEEPROM::SectorHeader::ACTIVE);
+        REQUIRE(eeprom.getActiveSector() == Sector2);
     }
 }
 
@@ -307,26 +408,25 @@ TEST_CASE("Copy records to sector", "[eeprom]")
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
-    // Start with erased flash
-    eeprom.store.eraseSector(TestBase);
-    eeprom.store.eraseSector(TestBase + TestSectorSize);
+    store.eraseAll();
+    store.writeSectorStatus(TestBase, TestEEPROM::SectorHeader::ACTIVE);
 
-    uint32_t fromOffset = TestBase + 2;
-    uint32_t toOffset = TestBase + TestSectorSize + 2;
-    uint8_t fromSector = 1;
-    uint8_t toSector = 2;
+    uint32_t activeOffset = TestBase + 2;
+    uint32_t alternateOffset = TestBase + TestSectorSize + 2;
+    auto fromSector = TestEEPROM::LogicalSector::Sector1;
+    auto toSector = TestEEPROM::LogicalSector::Sector2;
 
     SECTION("Single record")
     {
         uint16_t recordId = 100;
         uint8_t record = 0xBB;
-        fromOffset = store.writeRecord(fromOffset, recordId, record);
+        activeOffset = store.writeRecord(activeOffset, recordId, record);
 
         eeprom.copyAllRecordsToSector(fromSector, toSector);
 
         THEN("The record is copied")
         {
-            store.requireValidRecord(toOffset, recordId, record);
+            store.requireValidRecord(alternateOffset, recordId, record);
         }
     }
 
@@ -334,16 +434,16 @@ TEST_CASE("Copy records to sector", "[eeprom]")
     {
         uint16_t recordId = 100;
         uint8_t record = 0xBB;
-        fromOffset = store.writeRecord(fromOffset, recordId, record);
+        activeOffset = store.writeRecord(activeOffset, recordId, record);
 
         uint8_t newRecord = 0xCC;
-        fromOffset = store.writeRecord(fromOffset, recordId, newRecord);
+        activeOffset = store.writeRecord(activeOffset, recordId, newRecord);
 
         eeprom.copyAllRecordsToSector(fromSector, toSector);
 
         THEN("The latest record is copied")
         {
-            store.requireValidRecord(toOffset, recordId, newRecord);
+            store.requireValidRecord(alternateOffset, recordId, newRecord);
         }
     }
 
@@ -352,17 +452,150 @@ TEST_CASE("Copy records to sector", "[eeprom]")
         uint16_t recordIds[] = { 30, 10, 40 };
         uint32_t record = 0xDEADBEEF;
 
-        fromOffset = store.writeRecord(fromOffset, recordIds[0], record);
-        fromOffset = store.writeRecord(fromOffset, recordIds[1], record);
-        fromOffset = store.writeRecord(fromOffset, recordIds[2], record);
+        activeOffset = store.writeRecord(activeOffset, recordIds[0], record);
+        activeOffset = store.writeRecord(activeOffset, recordIds[1], record);
+        activeOffset = store.writeRecord(activeOffset, recordIds[2], record);
 
         eeprom.copyAllRecordsToSector(fromSector, toSector);
 
         THEN("The records are copied from small ids to large ids")
         {
-            toOffset = store.requireValidRecord(toOffset, recordIds[1], record);
-            toOffset = store.requireValidRecord(toOffset, recordIds[0], record);
-            toOffset = store.requireValidRecord(toOffset, recordIds[2], record);
+            alternateOffset = store.requireValidRecord(alternateOffset, recordIds[1], record);
+            alternateOffset = store.requireValidRecord(alternateOffset, recordIds[0], record);
+            alternateOffset = store.requireValidRecord(alternateOffset, recordIds[2], record);
+        }
+    }
+}
+
+TEST_CASE("Swap sectors", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    store.eraseAll();
+    store.writeSectorStatus(TestBase, TestEEPROM::SectorHeader::ACTIVE);
+
+    uint32_t activeOffset = TestBase;
+    uint32_t alternateOffset = TestBase + TestSectorSize;
+
+    // Write some data
+    uint16_t recordId = 100;
+    uint8_t record = 0xBB;
+    store.writeRecord(activeOffset + 2, recordId, record);
+
+    SECTION("Interrupted sector swap 1: during erase")
+    {
+        store.writeSectorStatus(alternateOffset, TestEEPROM::SectorHeader::INACTIVE);
+        eeprom.store.setWriteCount(0);
+        eeprom.swapSectors();
+
+        // Verify that the alternate sector is not yet erased
+        store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::INACTIVE);
+
+        THEN("Redoing the sector swap works")
+        {
+            eeprom.store.setWriteCount(INT_MAX);
+            eeprom.swapSectors();
+
+            store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::ACTIVE);
+            store.requireValidRecord(alternateOffset + 2, recordId, record);
+        }
+    }
+
+    SECTION("Interrupted sector swap 2: during copy")
+    {
+        eeprom.store.setWriteCount(2);
+        eeprom.swapSectors();
+
+        // Verify that the alternate sector is still copy
+        store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::COPY);
+
+        THEN("Redoing the sector swap works")
+        {
+            eeprom.store.setWriteCount(INT_MAX);
+            eeprom.swapSectors();
+
+            store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::ACTIVE);
+            store.requireValidRecord(alternateOffset + 2, recordId, record);
+        }
+    }
+
+    SECTION("Interrupted sector swap 3: before new sector activation")
+    {
+        eeprom.store.setWriteCount(5);
+        eeprom.swapSectors();
+
+        // Verify that the alternate sector is still copy and active sector is already inactive
+        store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::COPY);
+        store.requireSectorStatus(activeOffset, TestEEPROM::SectorHeader::INACTIVE);
+
+        THEN("Swapped sector becomes the active sector")
+        {
+            eeprom.store.setWriteCount(INT_MAX);
+
+            auto expectedSector = TestEEPROM::LogicalSector::Sector2;
+            REQUIRE(eeprom.getActiveSector() == expectedSector);
+
+            store.requireSectorStatus(alternateOffset, TestEEPROM::SectorHeader::ACTIVE);
+            store.requireValidRecord(alternateOffset + 2, recordId, record);
+        }
+    }
+}
+
+TEST_CASE("Erasable sector", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    store.eraseAll();
+
+    uint32_t activeOffset = TestBase;
+    uint32_t alternateOffset = TestBase + TestSectorSize;
+
+    SECTION("One active sector, one erased sector")
+    {
+        store.writeSectorStatus(activeOffset, TestEEPROM::SectorHeader::ACTIVE);
+
+        THEN("No sector needs to be erased")
+        {
+            auto expectedSector = TestEEPROM::LogicalSector::None;
+            REQUIRE(eeprom.getErasableSector() == expectedSector);
+            REQUIRE(eeprom.hasErasableSector() == false);
+        }
+    }
+
+    SECTION("One active sector, one inactive sector")
+    {
+        store.writeSectorStatus(activeOffset, TestEEPROM::SectorHeader::ACTIVE);
+        store.writeSectorStatus(alternateOffset, TestEEPROM::SectorHeader::INACTIVE);
+
+        THEN("The old sector needs to be erased")
+        {
+            auto expectedSector = TestEEPROM::LogicalSector::Sector2;
+            REQUIRE(eeprom.getErasableSector() == expectedSector);
+            REQUIRE(eeprom.hasErasableSector() == true);
+        }
+
+        THEN("Erasing the old sector clear it")
+        {
+            eeprom.eraseErasableSector();
+
+            auto expectedSector = TestEEPROM::LogicalSector::None;
+            REQUIRE(eeprom.getErasableSector() == expectedSector);
+            REQUIRE(eeprom.hasErasableSector() == false);
+        }
+    }
+
+    SECTION("One copy sector, one inactive sector")
+    {
+        store.writeSectorStatus(activeOffset, TestEEPROM::SectorHeader::COPY);
+        store.writeSectorStatus(alternateOffset, TestEEPROM::SectorHeader::INACTIVE);
+
+        THEN("The copy sector is marked active and the other sector needs to be erased")
+        {
+            auto expectedSector = TestEEPROM::LogicalSector::Sector2;
+            REQUIRE(eeprom.getErasableSector() == expectedSector);
+            REQUIRE(eeprom.hasErasableSector() == true);
         }
     }
 }

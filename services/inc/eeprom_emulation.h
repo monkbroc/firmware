@@ -29,21 +29,31 @@
 //                              offset/address
 // TODO: harmonize types: uintptr_t/uint32_t
 
-template <typename Store, uintptr_t Sector1, size_t Size1, uintptr_t Sector2, size_t Size2>
+template <typename Store, uintptr_t SectorBase1, size_t SectorSize1, uintptr_t SectorBase2, size_t SectorSize2>
 class EEPROMEmulation
 {
 public:
     using SectorSpan = std::pair<uintptr_t, size_t>;
 
-    static const size_t Capacity = std::min(Size1, Size2);
+    static const size_t Capacity = std::min(SectorSize1, SectorSize2);
+
+    enum class LogicalSector
+    {
+        None,
+        Sector1,
+        Sector2
+    };
 
     static const uint8_t FLASH_ERASED = 0xFF;
 
-    struct SectorHeader {
+    struct __attribute__((packed)) SectorHeader
+    {
         static const uint16_t ERASED = 0xFFFF;
-        static const uint16_t VERIFIED = 0x0FFF;
-        static const uint16_t COPY = 0x00FF;
-        static const uint16_t ACTIVE = 0x0000;
+        static const uint16_t COPY = 0x0FFF;
+        static const uint16_t ACTIVE = 0x00FF;
+        static const uint16_t INACTIVE = 0x000F;
+
+        static const uint16_t LEGACY_VALID = 0x0000;
 
         uint16_t status;
     };
@@ -83,7 +93,7 @@ public:
         return writeRecord(getActiveSector(), id, &input, sizeof(input));
     }
 
-    bool writeRecord(uint8_t sector, uint16_t id, const void *data, uint16_t length)
+    bool writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
     {
         bool written = false;
         forEachRecord(sector, [&](uint32_t offset, const Header &header)
@@ -117,23 +127,49 @@ public:
         return written;
     }
 
-    uint8_t getActiveSector()
+    LogicalSector getActiveSector()
     {
-        // TODO
-        return 1;
-    }
+        uint16_t status1 = readSectorStatus(LogicalSector::Sector1);
+        uint16_t status2 = readSectorStatus(LogicalSector::Sector2);
 
-    uint8_t getAlternateSector()
-    {
-        switch(getActiveSector())
+        // Pick the first active sector
+        if(status1 == SectorHeader::ACTIVE)
         {
-            case 1:
-                return 2;
-            default:
-                return 1;
+            return LogicalSector::Sector1;
+        }
+        else if(status2 == SectorHeader::ACTIVE)
+        {
+            return LogicalSector::Sector2;
+        }
+        // If the sector swap was interrupted just before the new sector
+        // was marked active, all the data was written properly so use
+        // the copy sector as the active sector
+        else if(status1 == SectorHeader::COPY && status2 == SectorHeader::INACTIVE)
+        {
+            writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
+            return LogicalSector::Sector1;
+        }
+        else if(status1 == SectorHeader::INACTIVE && status2 == SectorHeader::COPY)
+        {
+            writeSectorStatus(LogicalSector::Sector2, SectorHeader::ACTIVE);
+            return LogicalSector::Sector2;
+        }
+        else
+        {
+            return LogicalSector::None;
         }
     }
 
+    LogicalSector getAlternateSector()
+    {
+        switch(getActiveSector())
+        {
+            case LogicalSector::Sector1:
+                return LogicalSector::Sector2;
+            default:
+                return LogicalSector::Sector1;
+        }
+    }
 
     bool findRecord(uint16_t id, uint16_t &length, uintptr_t &data)
     {
@@ -150,8 +186,12 @@ public:
         return found;
     }
 
+    // Iterate through a sector and yield each record, including valid
+    // and invalid records, and the empty record at the end (if there is
+    // room)
+    // TODO: what if there's no room for the empty record?
     template <typename Func>
-    void forEachRecord(uint8_t sector, Func f)
+    void forEachRecord(LogicalSector sector, Func f)
     {
         SectorSpan span = getSectorSpan(sector);
         uint32_t currentAddress = span.first;
@@ -185,15 +225,49 @@ public:
             currentAddress += sizeof(header);
         }
     }
+
+    // Iterate through a sector and yield each valid record, in
+    // increasing order of id
+    template <typename Func>
+    void forEachValidRecord(LogicalSector sector, Func f)
+    {
+        uint16_t currentId;
+        uint32_t currentAddress;
+        int32_t lastId = -1;
+        bool nextRecordFound;
+
+        do
+        {
+            nextRecordFound = false;
+            currentId = UINT16_MAX;
+            forEachRecord(sector, [&](uint32_t offset, const Header &header)
+            {
+                if(header.status == Header::VALID && header.id <= currentId && (int32_t)header.id > lastId)
+                {
+                    currentId = header.id;
+                    currentAddress = offset;
+                    nextRecordFound = true;
+                }
+            });
+
+            if(nextRecordFound)
+            {
+                Header header;
+                store.read(currentAddress, &header, sizeof(Header));
+                f(currentAddress, header);
+                lastId = currentId;
+            }
+        } while(nextRecordFound);
+    }
    
-    SectorSpan getSectorSpan(uint8_t sector)
+    SectorSpan getSectorSpan(LogicalSector sector)
     {
         switch(sector)
         {
-            case 1:
-                return SectorSpan { Sector1, Sector1 + Size1 };
-            case 2:
-                return SectorSpan { Sector2, Sector2 + Size2 };
+            case LogicalSector::Sector1:
+                return SectorSpan { SectorBase1, SectorBase1 + SectorSize1 };
+            case LogicalSector::Sector2:
+                return SectorSpan { SectorBase2, SectorBase2 + SectorSize2 };
             default:
                 // TODO: what's the correct error behavior?
                 return SectorSpan { };
@@ -202,17 +276,9 @@ public:
 
     // Verify that the entire sector is erased to protect against resets
     // during sector erase
-    bool verifySector(uint8_t sector)
+    bool verifySector(LogicalSector sector)
     {
         SectorSpan span = getSectorSpan(sector);
-
-        SectorHeader header;
-        store.read(span.first, &header, sizeof(header));
-
-        if(header.status == SectorHeader::VERIFIED)
-        {
-            return true;
-        }
 
         for(uintptr_t offset = span.first; offset < span.second; offset++)
         {
@@ -221,60 +287,90 @@ public:
                 return false;
             }
         }
-        
-        header.status = SectorHeader::VERIFIED;
-        store.write(span.first, &header, sizeof(header));
+
         return true;
     }
 
-    void eraseSector(uint8_t sector)
+    void eraseSector(LogicalSector sector)
     {
         SectorSpan span = getSectorSpan(sector);
         store.eraseSector(span.first);
     }
 
-    bool swapSectors()
+    uint16_t readSectorStatus(LogicalSector sector)
     {
-        uint8_t activeSector = getActiveSector();
-        uint8_t alternateSector = getAlternateSector();
+        SectorSpan span = getSectorSpan(sector);
+        SectorHeader header;
+        store.read(span.first, &header, sizeof(header));
+        return header.status;
+    }
+
+    void writeSectorStatus(LogicalSector sector, uint16_t status)
+    {
+        SectorSpan span = getSectorSpan(sector);
+        SectorHeader header = { status };
+        store.write(span.first, &header, sizeof(header));
+    }
+
+    void swapSectors()
+    {
+        LogicalSector activeSector = getActiveSector();
+        LogicalSector alternateSector = getAlternateSector();
 
         if(!verifySector(alternateSector))
         {
             eraseSector(alternateSector);
         }
 
-        return false;
+        writeSectorStatus(alternateSector, SectorHeader::COPY);
+
+        copyAllRecordsToSector(activeSector, alternateSector);
+
+        writeSectorStatus(activeSector, SectorHeader::INACTIVE);
+        writeSectorStatus(alternateSector, SectorHeader::ACTIVE);
     }
 
-    void copyAllRecordsToSector(uint8_t fromSector, uint8_t toSector, int32_t exceptRecordId = -1)
+    void copyAllRecordsToSector(LogicalSector fromSector, LogicalSector toSector, int32_t exceptRecordId = -1)
     {
-        uint16_t currentLength = 0;
-        const void *currentData = nullptr;
-        uint16_t currentId;
-        int32_t lastId = -1;
-        bool newRecordFound;
-
-        do
+        forEachValidRecord(fromSector, [&](uint32_t offset, const Header &header)
         {
-            newRecordFound = false;
-            currentId = UINT16_MAX;
-            forEachRecord(fromSector, [&](uint32_t offset, const Header &header)
+            if((int32_t)header.id != exceptRecordId)
             {
-                if(header.status == Header::VALID && header.id <= currentId && (int32_t)header.id > lastId && (int32_t)header.id != exceptRecordId)
-                {
-                    currentId = header.id;
-                    currentLength = header.length;
-                    currentData = store.dataAt(offset + sizeof(header));
-                    newRecordFound = true;
-                }
-            });
-
-            if(newRecordFound)
-            {
-                writeRecord(toSector, currentId, currentData, currentLength);
-                lastId = currentId;
+                const void *currentData = store.dataAt(offset + sizeof(header));
+                writeRecord(toSector, header.id, currentData, header.length);
             }
-        } while(newRecordFound);
+        });
+    }
+
+    // Since erasing a sector prevents the bus accessing the Flash
+    // thus freezing the application code, provide an API for the user
+    // application to figure out if a sector needs to be erased.
+    // If the user application doesn't call eraseErasableSector(), then
+    // at the next sector swap the page will be erase anyway
+    LogicalSector getErasableSector()
+    {
+        LogicalSector alternateSector = getAlternateSector();
+        if(readSectorStatus(alternateSector) != SectorHeader::ERASED)
+        {
+            return alternateSector;
+        }
+        else
+        {
+            return LogicalSector::None;
+        }
+    }
+
+    bool hasErasableSector()
+    {
+        return getErasableSector() != LogicalSector::None;
+    }
+
+    void eraseErasableSector()
+    {
+        if(hasErasableSector())
+        {
+            eraseSector(getErasableSector());
+        }
     }
 
     Store store;
