@@ -39,7 +39,7 @@ public:
 
     enum class LogicalSector
     {
-        None,
+        NoSector,
         Sector1,
         Sector2
     };
@@ -91,6 +91,19 @@ public:
     bool put(uint16_t id, const T& input)
     {
         return writeRecord(getActiveSector(), id, &input, sizeof(input));
+    }
+
+    void init()
+    {
+        if(getActiveSector() == LogicalSector::NoSector)
+        {
+            eraseSector(LogicalSector::Sector1);
+            eraseSector(LogicalSector::Sector2);
+            writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
+        }
+
+        // If there's a pending erase after a sector swap, do it at boot
+        eraseErasableSector();
     }
 
     bool writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
@@ -156,7 +169,7 @@ public:
         }
         else
         {
-            return LogicalSector::None;
+            return LogicalSector::NoSector;
         }
     }
 
@@ -356,13 +369,13 @@ public:
         }
         else
         {
-            return LogicalSector::None;
+            return LogicalSector::NoSector;
         }
     }
 
     bool hasErasableSector()
     {
-        return getErasableSector() != LogicalSector::None;
+        return getErasableSector() != LogicalSector::NoSector;
     }
 
     void eraseErasableSector()
