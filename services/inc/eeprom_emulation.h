@@ -72,6 +72,21 @@ public:
 
     /* Public API */
 
+    // Initialize the EEPROM sectors
+    // Call at boot
+    void init()
+    {
+        if(getActiveSector() == LogicalSector::NoSector)
+        {
+            clear();
+        }
+
+        // If there's a pending erase after a sector swap, do it at boot
+        performPendingErase();
+    }
+
+    // Read the latest value of a record
+    // Returns false if the records was not found, true if read
     template <typename T>
     bool get(uint16_t id, T& output)
     {
@@ -84,17 +99,24 @@ public:
                 store.read(data, &output, sizeof(output));
                 return true;
             }
-            // else if length == 1 ==> convert from legacy (1 byte per address) to new format
+            // TODO
+            // else if length == 1 and sizeof(output) != 1
+            // ==> convert from legacy (1 byte per address) to new format
         }
         return false;
     }
 
+    // Writes a new value for a record
+    // Performs a sector swap (move all valid records to a new sector)
+    // if the current sector is full
+    // Returns false if there is not enough capacity to write this
+    // record (even after a sector swap), true if record was written
     template <typename T>
     bool put(uint16_t id, const T& input)
     {
         size_t recordSize = sizeof(Header) + sizeof(input);
 
-        if(recordSize > remainingCapacity())
+        if(recordSize > remainingCapacity(id))
         {
             return false;
         }
@@ -103,17 +125,7 @@ public:
         return true;
     }
 
-    void init()
-    {
-        if(getActiveSector() == LogicalSector::NoSector)
-        {
-            clear();
-        }
-
-        // If there's a pending erase after a sector swap, do it at boot
-        performPendingErase();
-    }
-
+    // Destroys all the data 💣
     void clear()
     {
         eraseSector(LogicalSector::Sector1);
@@ -121,6 +133,8 @@ public:
         writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
     }
 
+    // Mark a record as removed to free up some capacity at next sector swap
+    // Return false if the record was not found, true if it was removed.
     bool remove(uint16_t id)
     {
         bool removed = false;
@@ -137,29 +151,44 @@ public:
         return removed;
     }
 
+    // The total space available to write records.
+    //
+    // Note: The amount of data that fits is actually smaller since each
+    // record has a header
     size_t totalCapacity()
     {
         return Capacity - sizeof(SectorHeader);
     }
 
-    size_t usedCapacity()
+    // The space currently used by records if the EEPROM was compacted
+    // Optionally don't count record exceptRecordId
+    size_t usedCapacity(int32_t exceptRecordId = -1)
     {
         size_t capacity = 0;
         forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
         {
-            capacity += sizeof(Header) + header.length;
+            if((int32_t)header.id != exceptRecordId)
+            {
+                capacity += sizeof(Header) + header.length;
+            }
         });
         return capacity;
     }
 
-    size_t remainingCapacity()
+    // The space left to write new records
+    // Optionally don't count record exceptRecordId
+    //
+    // Note: The amount of data that fits is actually smaller since each
+    // record has a header
+    size_t remainingCapacity(int32_t exceptRecordId = -1)
     {
-        return totalCapacity() - usedCapacity();
+        return totalCapacity() - usedCapacity(exceptRecordId);
     }
 
-    size_t countRecords()
+    // How many valid records are currently stored
+    uint16_t countRecords()
     {
-        size_t count = 0;
+        uint16_t count = 0;
         forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
         {
             count++;
@@ -167,9 +196,11 @@ public:
         return count;
     }
 
-    size_t listRecords(uint16_t *recordIds, uint16_t maxRecordIds)
+    // Get the ids of the valid records currently stored
+    // Returns the number of ids written to the recordIds array
+    uint16_t listRecords(uint16_t *recordIds, uint16_t maxRecordIds)
     {
-        size_t count = 0;
+        uint16_t count = 0;
         forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
         {
             if(count < maxRecordIds)
@@ -181,7 +212,7 @@ public:
         return count;
     }
 
-    // Since erasing a sector prevents the bus accessing the Flash
+    // Since erasing a sector prevents the bus accessing the Flash memory
     // thus freezing the application code, provide an API for the user
     // application to figure out if a sector needs to be erased.
     // If the user application doesn't call performPendingErase(), then
@@ -191,6 +222,7 @@ public:
         return getPendingEraseSector() != LogicalSector::NoSector;
     }
 
+    // Erases the old sector after a sector swap, if necessary
     void performPendingErase()
     {
         if(hasPendingErase())
@@ -246,6 +278,7 @@ public:
         return freeOffset;
     }
 
+    // TODO: write description
     void writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
     {
         uintptr_t freeOffset = findEmptyOffset(sector);
@@ -315,7 +348,7 @@ public:
         }
     }
 
-    // Which sector should be used for the next swap
+    // Which sector should be used as the target for the next swap
     LogicalSector getAlternateSector()
     {
         switch(getActiveSector())
@@ -454,11 +487,18 @@ public:
         store.write(getSectorStart(sector), &header, sizeof(header));
     }
 
+    // Write all valid records from the active sector to the alternate
+    // sector. Erase the alternate sector if it is not already erased.
+    // 
+    // Optionally don't copy record exceptRecordId
     void swapSectors(int32_t exceptRecordId = -1)
     {
         LogicalSector activeSector = getActiveSector();
         LogicalSector alternateSector = getAlternateSector();
 
+        // TODO: add a loop here 2 tries and validation to protect against
+        // marginal erase? If a sector was kind of erased and reads back as
+        // all 0xFF but when values are written some bits are actually 0.
         if(!verifySector(alternateSector))
         {
             eraseSector(alternateSector);
@@ -472,6 +512,7 @@ public:
         writeSectorStatus(alternateSector, SectorHeader::ACTIVE);
     }
 
+    // Perform the actual copy of records during sector swap
     void copyAllRecordsToSector(LogicalSector fromSector, LogicalSector toSector, int32_t exceptRecordId = -1)
     {
         forEachValidRecord(fromSector, [&](uintptr_t offset, const Header &header)
@@ -484,6 +525,7 @@ public:
         });
     }
 
+    // Which sector needs to be erased after a sector swap.
     LogicalSector getPendingEraseSector()
     {
         LogicalSector alternateSector = getAlternateSector();
@@ -497,5 +539,6 @@ public:
         }
     }
 
+    // Hardware-dependent interface to read, erase and program memory
     Store store;
 };

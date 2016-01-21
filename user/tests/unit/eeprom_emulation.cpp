@@ -384,9 +384,11 @@ TEST_CASE("Put record", "[eeprom]")
             eeprom.put(id, i);
         }
 
-        WARN(store.dumpStorage(SectorBase2, 30));
         REQUIRE(eeprom.getActiveSector() == Sector2);
     }
+
+    // TODO: add test for pathological case where EEPROM is at capacity
+    // then putting a record that would fit only after a sector swap
 
 }
 
@@ -455,8 +457,13 @@ TEST_CASE("Used capacity", "[eeprom]")
         eeprom.put(i, data);
     }
 
-    size_t expectedCapacity = 20 * (sizeof(TestEEPROM::Header) + sizeof(data));
-    REQUIRE(eeprom.usedCapacity() == expectedCapacity);
+    THEN("Measures capacity for valid records, except the one specified")
+    {
+        size_t expectedCapacity = 19 * (sizeof(TestEEPROM::Header) + sizeof(data));
+        uint16_t exceptRecordId = 10;
+
+        REQUIRE(eeprom.usedCapacity(exceptRecordId) == expectedCapacity);
+    }
 }
 
 TEST_CASE("Count records", "[eeprom]")
