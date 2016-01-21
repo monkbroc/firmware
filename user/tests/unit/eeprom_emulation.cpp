@@ -6,15 +6,18 @@
 #include "eeprom_emulation.h"
 #include "flash_storage.h"
 
-const int TestSectorSize = 0x4000;
-const int TestSectorCount = 2;
-const int TestBase = 0xC000;
+const size_t TestSectorSize = 0x4000;
+const uint8_t TestSectorCount = 2;
+const uintptr_t TestBase = 0xC000;
 
-const int SectorBase1 = TestBase;
-const int SectorBase2 = TestBase + TestSectorSize;
+/* Simulate 2 Flash sectors of different sizes used for EEPROM emulation */
+const uintptr_t SectorBase1 = TestBase;
+const size_t SectorSize1 = TestSectorSize;
+const uintptr_t SectorBase2 = TestBase + TestSectorSize;
+const size_t SectorSize2 = TestSectorSize / 4;
 
 using TestStore = RAMFlashStorage<TestBase, TestSectorCount, TestSectorSize>;
-using TestEEPROM = EEPROMEmulation<TestStore, SectorBase1, TestSectorSize, SectorBase2, TestSectorSize>;
+using TestEEPROM = EEPROMEmulation<TestStore, SectorBase1, SectorSize1, SectorBase2, SectorSize2>;
 
 // Alias some constants, otherwise the linker is having issues when
 // those are used inside REQUIRE() tests
@@ -145,7 +148,7 @@ public:
         return offset + sizeof(expected);
     }
 
-    // Test debugging helper to view the storage contents
+    // Debugging helper to view the storage contents
     // Usage:
     // WARN(store.dumpStorage(SectorBase1, 30));
     std::string dumpStorage(uintptr_t offset, uint16_t length)
@@ -199,7 +202,7 @@ TEST_CASE("Get record", "[eeprom]")
         }
     }
 
-    SECTION("A partial record exists")
+    SECTION("A bad record exists")
     {
         uint16_t recordId = 0;
         uint8_t badRecord = 0xCC;
@@ -253,7 +256,7 @@ TEST_CASE("Get record", "[eeprom]")
 
         SECTION("With bad records")
         {
-            uint8_t badRecord[] = { 0xCC, 0xDD };
+            uint8_t badRecord[] = { 0xDD, 0xEE };
             offset = store.writeInvalidRecord(offset, recordId, badRecord);
             offset = store.writeRecordHeader(offset, recordId, badRecord);
             offset = store.writePartialRecord(offset, recordId, badRecord);
@@ -298,6 +301,29 @@ TEST_CASE("Put record", "[eeprom]")
         }
     }
 
+    SECTION("A bad record exists")
+    {
+        uint16_t recordId = 0;
+        uint8_t badRecord = 0xEE;
+        offset = store.writeRecordHeader(offset, recordId, badRecord);
+
+        uint8_t record = 0xDD;
+
+        THEN("put returns true and creates the record")
+        {
+            REQUIRE(eeprom.put(recordId, record) == true);
+            store.requireValidRecord(offset, recordId, record);
+        }
+
+        THEN("get returns the put record")
+        {
+            eeprom.put(recordId, record);
+            uint8_t newRecord;
+            REQUIRE(eeprom.get(recordId, newRecord) == true);
+            REQUIRE(newRecord == 0xDD);
+        }
+    }
+
     SECTION("The record exists")
     {
         uint16_t recordId = 0;
@@ -321,7 +347,49 @@ TEST_CASE("Put record", "[eeprom]")
             REQUIRE(newRecord == 0xDD);
         }
     }
+
+    SECTION("EEPROM capacity is reached")
+    {
+        uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        uint16_t id;
+        bool success = true;
+        // Write many large records
+        for(id = 0; id < 200 && success; id++)
+        {
+            success = eeprom.put(id, data);
+        }
+
+        THEN("Additional records cannot be added if they wouldn't fit in the smallest sector")
+        {
+            REQUIRE(id < 200);
+
+            uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
+            REQUIRE(eeprom.remainingCapacity() < recordSize);
+        }
+    }
+
+    SECTION("Sector swap is required")
+    {
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+
+        uint16_t writesToOverflowSector1 =
+            SectorSize1 / (sizeof(TestEEPROM::Header) + sizeof(uint32_t)) + 1;
+
+        uint16_t id = 100;
+
+        // Write multiple copies of the same record until sector 1 is
+        // full, forcing a sector swap
+        for(uint32_t i = 0; i < writesToOverflowSector1; i++)
+        {
+            eeprom.put(id, i);
+        }
+
+        WARN(store.dumpStorage(SectorBase2, 30));
+        REQUIRE(eeprom.getActiveSector() == Sector2);
+    }
+
 }
+
 
 TEST_CASE("Remove record", "[eeprom]")
 {
@@ -355,6 +423,92 @@ TEST_CASE("Remove record", "[eeprom]")
             REQUIRE(eeprom.get(recordId, record) == false);
         }
     }
+}
+
+TEST_CASE("Total capacity", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    size_t smallestSectorSize = TestSectorSize / 4 - sizeof(TestEEPROM::SectorHeader);
+
+    REQUIRE(eeprom.totalCapacity() == smallestSectorSize);
+}
+
+TEST_CASE("Used capacity", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    eeprom.init();
+
+    // Bad records should be ignored
+    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
+
+    uint8_t dummy = 0xCC;
+    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
+
+    for(uint16_t i = 0; i < 20; i++)
+    {
+        // Old records should be ignored
+        eeprom.put(i, dummy);
+
+        // Latest records should be counted
+        eeprom.put(i, data);
+    }
+
+    size_t expectedCapacity = 20 * (sizeof(TestEEPROM::Header) + sizeof(data));
+    REQUIRE(eeprom.usedCapacity() == expectedCapacity);
+}
+
+TEST_CASE("Count records", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    eeprom.init();
+
+    // Bad records should be ignored
+    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
+
+    uint8_t dummy = 0xCC;
+    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
+
+    for(uint16_t i = 0; i < 20; i++)
+    {
+        // Duplicate records should be only counted once
+        eeprom.put(i, dummy);
+        eeprom.put(i, data);
+    }
+
+    REQUIRE(eeprom.countRecords() == 20);
+}
+
+
+TEST_CASE("List records", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    eeprom.init();
+
+    // Bad records should be ignored
+    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
+
+    uint8_t dummy = 0xCC;
+    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
+
+    for(uint16_t i = 0; i < 3; i++)
+    {
+        // Duplicate records should be only counted once
+        eeprom.put(i * 2, dummy);
+        eeprom.put(i * 2, data);
+    }
+
+    uint16_t ids[5];
+    REQUIRE(eeprom.listRecords(ids, 5) == 3);
+
+    REQUIRE(ids[0] == 0);
+    REQUIRE(ids[1] == 2);
+    REQUIRE(ids[2] == 4);
 }
 
 TEST_CASE("Initialize EEPROM", "[eeprom]")
@@ -415,6 +569,20 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
         }
     }
 
+}
+
+TEST_CASE("Clear", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    eeprom.clear();
+
+    THEN("Sector 1 is active, sector 2 is erased")
+    {
+        store.requireSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        store.requireSectorStatus(SectorBase2, SECTOR_ERASED);
+    }
 }
 
 TEST_CASE("Verify sector", "[eeprom]")
@@ -704,8 +872,8 @@ TEST_CASE("Erasable sector", "[eeprom]")
 
         THEN("No sector needs to be erased")
         {
-            REQUIRE(eeprom.getErasableSector() == NoSector);
-            REQUIRE(eeprom.hasErasableSector() == false);
+            REQUIRE(eeprom.getPendingEraseSector() == NoSector);
+            REQUIRE(eeprom.hasPendingErase() == false);
         }
     }
 
@@ -716,16 +884,16 @@ TEST_CASE("Erasable sector", "[eeprom]")
 
         THEN("The old sector needs to be erased")
         {
-            REQUIRE(eeprom.getErasableSector() == Sector2);
-            REQUIRE(eeprom.hasErasableSector() == true);
+            REQUIRE(eeprom.getPendingEraseSector() == Sector2);
+            REQUIRE(eeprom.hasPendingErase() == true);
         }
 
         THEN("Erasing the old sector clear it")
         {
-            eeprom.eraseErasableSector();
+            eeprom.performPendingErase();
 
-            REQUIRE(eeprom.getErasableSector() == NoSector);
-            REQUIRE(eeprom.hasErasableSector() == false);
+            REQUIRE(eeprom.getPendingEraseSector() == NoSector);
+            REQUIRE(eeprom.hasPendingErase() == false);
         }
     }
 
@@ -736,8 +904,8 @@ TEST_CASE("Erasable sector", "[eeprom]")
 
         THEN("The copy sector is marked active and the other sector needs to be erased")
         {
-            REQUIRE(eeprom.getErasableSector() == Sector2);
-            REQUIRE(eeprom.hasErasableSector() == true);
+            REQUIRE(eeprom.getPendingEraseSector() == Sector2);
+            REQUIRE(eeprom.hasPendingErase() == true);
         }
     }
 }
