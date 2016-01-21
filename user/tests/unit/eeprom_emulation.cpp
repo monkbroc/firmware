@@ -172,16 +172,15 @@ TEST_CASE("Get record", "[eeprom]")
     eeprom.init();
 
     uint32_t offset = SectorBase1 + 2;
+    uint8_t value;
 
     SECTION("The record doesn't exist")
     {
         uint16_t recordId = 999;
         SECTION("No other records")
         {
-
             THEN("get returns false")
             {
-                uint8_t value;
                 REQUIRE(eeprom.get(recordId, value) == false);
             }
         }
@@ -195,7 +194,42 @@ TEST_CASE("Get record", "[eeprom]")
 
             THEN("get returns false")
             {
-                uint8_t value;
+                REQUIRE(eeprom.get(recordId, value) == false);
+            }
+        }
+    }
+
+    SECTION("A partial record exists")
+    {
+        uint16_t recordId = 0;
+        uint8_t badRecord = 0xCC;
+
+        SECTION("invalid record")
+        {
+            offset = store.writeInvalidRecord(offset, recordId, badRecord);
+
+            THEN("get returns false")
+            {
+                REQUIRE(eeprom.get(recordId, value) == false);
+            }
+        }
+
+        SECTION("missing data")
+        {
+            offset = store.writeRecordHeader(offset, recordId, badRecord);
+
+            THEN("get returns false")
+            {
+                REQUIRE(eeprom.get(recordId, value) == false);
+            }
+        }
+
+        SECTION("partial data")
+        {
+            offset = store.writePartialRecord(offset, recordId, badRecord);
+
+            THEN("get returns false")
+            {
                 REQUIRE(eeprom.get(recordId, value) == false);
             }
         }
@@ -212,7 +246,6 @@ TEST_CASE("Get record", "[eeprom]")
 
             THEN("get returns true and extracts the value")
             {
-                uint8_t value;
                 REQUIRE(eeprom.get(recordId, value) == true);
                 REQUIRE(value == 0xCC);
             }
@@ -229,7 +262,6 @@ TEST_CASE("Get record", "[eeprom]")
 
             THEN("get returns true and extracts the value")
             {
-                uint8_t value;
                 REQUIRE(eeprom.get(recordId, value) == true);
                 REQUIRE(value == 0xCC);
             }
@@ -287,6 +319,40 @@ TEST_CASE("Put record", "[eeprom]")
             uint8_t newRecord;
             REQUIRE(eeprom.get(recordId, newRecord) == true);
             REQUIRE(newRecord == 0xDD);
+        }
+    }
+}
+
+TEST_CASE("Remove record", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+    eeprom.init();
+
+    SECTION("The record doesn't exist")
+    {
+        uint16_t recordId = 0;
+
+        REQUIRE(eeprom.remove(recordId) == false);
+    }
+
+    SECTION("The record exists")
+    {
+        uint16_t recordId = 0;
+        uint8_t record = 0xCC;
+
+        eeprom.put(recordId, record);
+
+        THEN("remove returns true")
+        {
+            REQUIRE(eeprom.remove(recordId) == true);
+        }
+
+        THEN("get doesn't return the removed record")
+        {
+            eeprom.remove(recordId);
+
+            REQUIRE(eeprom.get(recordId, record) == false);
         }
     }
 }

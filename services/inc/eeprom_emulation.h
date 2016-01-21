@@ -60,11 +60,12 @@ public:
 
     struct __attribute__((packed)) Header
     {
-        static const uint32_t EMPTY = 0xFFFF;
-        static const uint32_t INVALID = 0x00FF;
-        static const uint32_t VALID = 0x0000;
+        static const uint16_t EMPTY = 0xFFFF;
+        static const uint16_t INVALID = 0x0FFF;
+        static const uint16_t VALID = 0x00FF;
+        static const uint16_t REMOVED = 0x000F;
 
-        static const uint32_t EMPTY_LENGTH = 0xFFFF;
+        static const uint16_t EMPTY_LENGTH = 0xFFFF;
 
         uint16_t status;
         uint16_t id;
@@ -83,6 +84,7 @@ public:
                 store.read(data, &output, sizeof(output));
                 return true;
             }
+            // else if length == 1 ==> convert from legacy (1 byte per address) to new format
         }
         return false;
     }
@@ -105,6 +107,24 @@ public:
         // If there's a pending erase after a sector swap, do it at boot
         eraseErasableSector();
     }
+
+    bool remove(uint16_t id)
+    {
+        bool removed = false;
+        forEachRecord(getActiveSector(), [&](uint32_t offset, const Header &header)
+        {
+            if(header.id == id)
+            {
+                uint16_t status = Header::REMOVED;
+                store.write(offset, &status, sizeof(status));
+                removed = true;
+            }
+        });
+
+        return removed;
+    }
+
+    // TODO: add total capacity and capacity remaining methods
 
     bool writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
     {
@@ -189,7 +209,7 @@ public:
         bool found = false;
         forEachRecord(getActiveSector(), [&](uint32_t offset, const Header &header)
         {
-            if(header.id == id)
+            if(header.status == Header::VALID && header.id == id)
             {
                 length = header.length;
                 data = offset + sizeof(header);
