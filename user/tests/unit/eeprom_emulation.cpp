@@ -69,8 +69,13 @@ public:
     template <typename T>
     uintptr_t writeInvalidRecord(uintptr_t offset, uint16_t id, const T& record)
     {
-        uint16_t status = TestEEPROM::Header::INVALID;
-        store.write(offset, &status, sizeof(status));
+        TestEEPROM::Header header = {
+            TestEEPROM::Header::INVALID,
+            0,
+            0
+        };
+
+        store.write(offset, &header, sizeof(header.status));
         // Next record should be written directly after the invalid header
         return offset + sizeof(TestEEPROM::Header);
     }
@@ -82,8 +87,8 @@ public:
     {
         TestEEPROM::Header header = {
             TestEEPROM::Header::INVALID,
-            id,
-            sizeof(record)
+            sizeof(record),
+            id
         };
 
         store.write(offset, &header, sizeof(header));
@@ -98,8 +103,8 @@ public:
     {
         TestEEPROM::Header header = {
             TestEEPROM::Header::INVALID,
-            id,
-            sizeof(record)
+            sizeof(record),
+            id
         };
 
         store.write(offset, &header, sizeof(header));
@@ -117,8 +122,8 @@ public:
     {
         TestEEPROM::Header header = {
             TestEEPROM::Header::VALID,
-            id,
-            sizeof(record)
+            sizeof(record),
+            id
         };
 
         store.write(offset, &header, sizeof(header));
@@ -133,16 +138,16 @@ public:
     template <typename T>
     uintptr_t requireValidRecord(uintptr_t offset, uint16_t id, const T& expected)
     {
-        uint16_t status = TestEEPROM::Header::VALID;
+        auto status = TestEEPROM::Header::VALID;
         REQUIRE(std::memcmp(store.dataAt(offset), &status, sizeof(status)) == 0);
         offset += sizeof(status);
-
-        REQUIRE(std::memcmp(store.dataAt(offset), &id, sizeof(id)) == 0);
-        offset += sizeof(id);
 
         uint16_t length = sizeof(expected);
         REQUIRE(std::memcmp(store.dataAt(offset), &length, sizeof(length)) == 0);
         offset += sizeof(length);
+
+        REQUIRE(std::memcmp(store.dataAt(offset), &id, sizeof(id)) == 0);
+        offset += sizeof(id);
 
         REQUIRE(std::memcmp(store.dataAt(offset), &expected, sizeof(expected)) == 0);
         return offset + sizeof(expected);

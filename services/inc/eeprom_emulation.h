@@ -31,6 +31,7 @@
 
 // TODO: think about alignment of records, and the impact
 // FLASH_ProgramHalfWord / FLASH_ProgramByte on the robustness
+// ==> Conclusion: No impact.
 
 // TODO: add API to support external iteration through valid records
 
@@ -56,6 +57,7 @@ public:
         static const uint16_t ACTIVE = 0x00FF;
         static const uint16_t INACTIVE = 0x000F;
 
+        // TODO: use this for migration
         static const uint16_t LEGACY_ACTIVE = 0x0000;
 
         uint16_t status;
@@ -63,17 +65,18 @@ public:
 
     struct __attribute__((packed)) Header
     {
-        // TODO: can the status be uint8_t? what's the impact on alignment?
-        static const uint16_t EMPTY = 0xFFFF;
-        static const uint16_t INVALID = 0x0FFF;
-        static const uint16_t VALID = 0x00FF;
-        static const uint16_t REMOVED = 0x000F;
+        // TODO: does it matter if status is uint8_t or uint16_t? impact
+        // on alignment?
+        static const uint8_t EMPTY = 0xFF;
+        static const uint8_t INVALID = 0x7F;
+        static const uint8_t VALID = 0x0F;
+        static const uint8_t REMOVED = 0x07;
 
         static const uint16_t EMPTY_LENGTH = 0xFFFF;
 
-        uint16_t status;
-        uint16_t id;
+        uint8_t status;
         uint16_t length;
+        uint16_t id;
     };
 
     /* Public API */
@@ -176,8 +179,8 @@ public:
         {
             if(header.id == id)
             {
-                uint16_t status = Header::REMOVED;
-                store.write(offset, &status, sizeof(status));
+                Header header = { Header::REMOVED, 0, 0 };
+                store.write(offset, &header, sizeof(header.status));
                 removed = true;
                 currentLength = header.length;
             }
@@ -333,8 +336,8 @@ public:
 
         Header header = {
             Header::INVALID,
-            id,
-            length
+            length,
+            id
         };
 
         // Write header
@@ -353,7 +356,7 @@ public:
 
         // Write final valid status
         header.status = Header::VALID;
-        if(store.write(freeOffset, &header, sizeof(header.status)) < 0)
+        if(store.write(headerOffset, &header, sizeof(header.status)) < 0)
         {
             return false;
         }
@@ -471,7 +474,9 @@ public:
             currentId = UINT16_MAX;
             forEachRecord(sector, [&](uintptr_t offset, const Header &header)
             {
-                if(header.status == Header::VALID && header.id <= currentId && (int32_t)header.id > previousId)
+                if(header.status == Header::VALID &&
+                        header.id <= currentId &&
+                        (int32_t)header.id > previousId)
                 {
                     currentId = header.id;
                     currentOffset = offset;
@@ -483,6 +488,8 @@ public:
             {
                 Header header;
                 store.read(currentOffset, &header, sizeof(Header));
+
+                // Yield record
                 f(currentOffset, header);
                 previousId = currentId;
             }
