@@ -348,48 +348,90 @@ TEST_CASE("Put record", "[eeprom]")
         }
     }
 
+    SECTION("The new record value is the same as current one")
+    {
+        uint16_t recordId = 0;
+        uint8_t record = 0xCC;
+
+        eeprom.put(recordId, record);
+
+        uintptr_t originalEmptyOffset = eeprom.findEmptyOffset(eeprom.getActiveSector());
+
+        THEN("put returns true but doesn't create a new copy of the record")
+        {
+            REQUIRE(eeprom.put(recordId, record) == true);
+
+            uintptr_t emptyOffset = eeprom.findEmptyOffset(eeprom.getActiveSector());
+            REQUIRE(emptyOffset == originalEmptyOffset);
+        }
+    }
+
     SECTION("EEPROM capacity is reached")
     {
         uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        uint16_t id;
-        bool success = true;
-        // Write many large records
-        for(id = 0; id < 200 && success; id++)
+        uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
+
+        // Write many large records until capacity is reached
+        for(uint16_t id = 0; id < 200 && eeprom.remainingCapacity() >= recordSize; id++)
         {
-            success = eeprom.put(id, data);
+            REQUIRE(eeprom.put(id, data) == true);
         }
 
         THEN("Additional records cannot be added if they wouldn't fit in the smallest sector")
         {
-            REQUIRE(id < 200);
-
-            uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
-            REQUIRE(eeprom.remainingCapacity() < recordSize);
+            REQUIRE(eeprom.put(1000, data) == false);
         }
     }
 
     SECTION("Sector swap is required")
     {
-        REQUIRE(eeprom.getActiveSector() == Sector1);
-
-        uint16_t writesToOverflowSector1 =
-            SectorSize1 / (sizeof(TestEEPROM::Header) + sizeof(uint32_t)) + 1;
+        uint16_t recordSize = sizeof(uint32_t) + sizeof(TestEEPROM::Header);
+        uint16_t writesToFillSector1 = SectorSize1 / recordSize;
 
         uint16_t id = 100;
 
-        // Write multiple copies of the same record until sector 1 is
-        // full, forcing a sector swap
-        for(uint32_t i = 0; i < writesToOverflowSector1; i++)
+        // Write multiple copies of the same record until sector 1 is full
+        for(uint32_t i = 0; i < writesToFillSector1; i++)
         {
-            eeprom.put(id, i);
+            REQUIRE(eeprom.put(id, i) == true);
+        }
+
+        REQUIRE(eeprom.getActiveSector() == Sector1);
+
+        THEN("The next write performs a sector swap")
+        {
+            uint32_t record = 0xCC;
+            REQUIRE(eeprom.put(id, record) == true);
+
+            REQUIRE(eeprom.getActiveSector() == Sector2);
+        }
+    }
+
+    SECTION("EEPROM is near capacity and overwriting an existing record would only fit after a sector swap")
+    {
+        // Sector2 is smaller than sector1 in this test so it's easier
+        // to fill sector2
+        eeprom.swapSectors();
+
+        uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
+
+        // Write many large records until there is no room for another record
+        for(uint16_t id = 0; id < 200 && eeprom.remainingCapacity() >= recordSize; id++)
+        {
+            REQUIRE(eeprom.put(id, data) == true);
         }
 
         REQUIRE(eeprom.getActiveSector() == Sector2);
+
+        THEN("Overwritten record is added after sector swap")
+        {
+            uint32_t data2[] = { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
+            uint16_t recordId = 0;
+            REQUIRE(eeprom.put(recordId, data2) == true);
+            REQUIRE(eeprom.getActiveSector() == Sector1);
+        }
     }
-
-    // TODO: add test for pathological case where EEPROM is at capacity
-    // then putting a record that would fit only after a sector swap
-
 }
 
 

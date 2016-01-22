@@ -29,6 +29,12 @@
 //              use offset, not address
 //              use uintptr_t for offset, size_t for sector sizes
 
+// TODO: use the return value of store.write() to verify that data was
+// written properly?
+
+// TODO: think about alignment of records, and the impact
+// FLASH_ProgramHalfWord / FLASH_ProgramByte on the robustness
+
 template <typename Store, uintptr_t SectorBase1, size_t SectorSize1, uintptr_t SectorBase2, size_t SectorSize2>
 class EEPROMEmulation
 {
@@ -114,6 +120,12 @@ public:
     template <typename T>
     bool put(uint16_t id, const T& input)
     {
+        // don't create a new record if identical to previous record
+        if(verify(id, input))
+        {
+            return true;
+        }
+
         size_t recordSize = sizeof(Header) + sizeof(input);
 
         if(recordSize > remainingCapacity(id))
@@ -263,6 +275,21 @@ public:
         }
     }
 
+    // Check if the existing value of a record matches the new value
+    template <typename T>
+    bool verify(uint16_t id, const T& input)
+    {
+        T existing;
+        if(get(id, existing))
+        {
+            return std::memcmp(&input, &existing, sizeof(input)) == 0;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
     // The offset to the first empty record, or the end of the sector if
     // no records are empty
     uintptr_t findEmptyOffset(LogicalSector sector)
@@ -351,13 +378,7 @@ public:
     // Which sector should be used as the target for the next swap
     LogicalSector getAlternateSector()
     {
-        switch(getActiveSector())
-        {
-            case LogicalSector::Sector1:
-                return LogicalSector::Sector2;
-            default:
-                return LogicalSector::Sector1;
-        }
+        return getActiveSector() == LogicalSector::Sector1 ? LogicalSector::Sector2 : LogicalSector::Sector1;
     }
 
     // Iterate through a sector to find the latest valid record with a

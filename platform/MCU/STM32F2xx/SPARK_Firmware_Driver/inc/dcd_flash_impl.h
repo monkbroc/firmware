@@ -53,6 +53,12 @@ public:
                 destination += 4;
                 data_ptr += 4;
             }
+            else if ( !(destination & 0x01) && (end_ptr - data_ptr >= 2))  // have a half word to write
+            {
+                while ((FLASH_COMPLETE != (status = FLASH_ProgramHalfWord(destination, *(const uint32_t*)data_ptr))) && (tries++ < max_tries));
+                destination += 2;
+                data_ptr += 2;
+            }
             else
             {
                 while ((FLASH_COMPLETE != (status = FLASH_ProgramByte(destination, *data_ptr))) && (tries++ < max_tries));
