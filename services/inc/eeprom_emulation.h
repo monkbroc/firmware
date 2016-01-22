@@ -29,17 +29,16 @@
 //              use offset, not address
 //              use uintptr_t for offset, size_t for sector sizes
 
-// TODO: use the return value of store.write() to verify that data was
-// written properly?
-
 // TODO: think about alignment of records, and the impact
 // FLASH_ProgramHalfWord / FLASH_ProgramByte on the robustness
+
+// TODO: add API to support external iteration through valid records
 
 template <typename Store, uintptr_t SectorBase1, size_t SectorSize1, uintptr_t SectorBase2, size_t SectorSize2>
 class EEPROMEmulation
 {
 public:
-    static constexpr size_t Capacity = (SectorSize1 < SectorSize2) ? SectorSize1 : SectorSize2;
+    static constexpr size_t SmallestSectorSize = (SectorSize1 < SectorSize2) ? SectorSize1 : SectorSize2;
 
     enum class LogicalSector
     {
@@ -64,6 +63,7 @@ public:
 
     struct __attribute__((packed)) Header
     {
+        // TODO: can the status be uint8_t? what's the impact on alignment?
         static const uint16_t EMPTY = 0xFFFF;
         static const uint16_t INVALID = 0x0FFF;
         static const uint16_t VALID = 0x00FF;
@@ -82,6 +82,8 @@ public:
     // Call at boot
     void init()
     {
+        updateActiveSector();
+
         if(getActiveSector() == LogicalSector::NoSector)
         {
             clear();
@@ -89,6 +91,8 @@ public:
 
         // If there's a pending erase after a sector swap, do it at boot
         performPendingErase();
+
+        calculateCapacity();
     }
 
     // Read the latest value of a record
@@ -97,12 +101,12 @@ public:
     bool get(uint16_t id, T& output)
     {
         uint16_t length;
-        uintptr_t data;
-        if(findRecord(id, length, data))
+        uintptr_t dataOffset;
+        if(findRecord(id, length, dataOffset))
         {
             if(length == sizeof(output))
             {
-                store.read(data, &output, sizeof(output));
+                store.read(dataOffset, &output, sizeof(output));
                 return true;
             }
             // TODO
@@ -120,20 +124,34 @@ public:
     template <typename T>
     bool put(uint16_t id, const T& input)
     {
-        // don't create a new record if identical to previous record
-        if(verify(id, input))
+        // Don't create a new record if identical to previous record
+        uint16_t previousLength = 0;
+        uintptr_t dataOffset = 0;
+        if(findRecord(id, previousLength, dataOffset))
         {
-            return true;
+            if(identicalValues(input, previousLength, dataOffset))
+            {
+                return true;
+            }
+            size_t previousRecordSize = sizeof(Header) + previousLength;
+            updateCapacity(-previousRecordSize);
         }
 
         size_t recordSize = sizeof(Header) + sizeof(input);
 
-        if(recordSize > remainingCapacity(id))
+        // If the new record wouldn't fit even if the current record
+        // were to be removed from the storage by a page swap
+        if(recordSize > remainingCapacity())
         {
             return false;
         }
 
-        writeRecord(getActiveSector(), id, &input, sizeof(input));
+        if(!writeRecord(getActiveSector(), id, &input, sizeof(input)))
+        {
+            return swapSectorsAndWriteRecord(id, &input, sizeof(input));
+        }
+
+        updateCapacity(recordSize);
         return true;
     }
 
@@ -143,6 +161,9 @@ public:
         eraseSector(LogicalSector::Sector1);
         eraseSector(LogicalSector::Sector2);
         writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
+
+        updateActiveSector();
+        calculateCapacity();
     }
 
     // Mark a record as removed to free up some capacity at next sector swap
@@ -150,6 +171,7 @@ public:
     bool remove(uint16_t id)
     {
         bool removed = false;
+        uint16_t currentLength = 0;
         forEachRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
         {
             if(header.id == id)
@@ -157,8 +179,11 @@ public:
                 uint16_t status = Header::REMOVED;
                 store.write(offset, &status, sizeof(status));
                 removed = true;
+                currentLength = header.length;
             }
         });
+
+        updateCapacity(-currentLength);
 
         return removed;
     }
@@ -169,32 +194,22 @@ public:
     // record has a header
     size_t totalCapacity()
     {
-        return Capacity - sizeof(SectorHeader);
+        return SmallestSectorSize - sizeof(SectorHeader);
     }
 
-    // The space currently used by records if the EEPROM was compacted
-    // Optionally don't count record exceptRecordId
-    size_t usedCapacity(int32_t exceptRecordId = -1)
+    // The space currently used by all valid records
+    size_t usedCapacity()
     {
-        size_t capacity = 0;
-        forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
-        {
-            if((int32_t)header.id != exceptRecordId)
-            {
-                capacity += sizeof(Header) + header.length;
-            }
-        });
         return capacity;
     }
 
     // The space left to write new records
-    // Optionally don't count record exceptRecordId
     //
     // Note: The amount of data that fits is actually smaller since each
     // record has a header
-    size_t remainingCapacity(int32_t exceptRecordId = -1)
+    size_t remainingCapacity()
     {
-        return totalCapacity() - usedCapacity(exceptRecordId);
+        return totalCapacity() - usedCapacity();
     }
 
     // How many valid records are currently stored
@@ -277,17 +292,11 @@ public:
 
     // Check if the existing value of a record matches the new value
     template <typename T>
-    bool verify(uint16_t id, const T& input)
+    bool identicalValues(const T& input, uint16_t length, uintptr_t dataOffset)
     {
-        T existing;
-        if(get(id, existing))
-        {
-            return std::memcmp(&input, &existing, sizeof(input)) == 0;
-        }
-        else
-        {
-            return false;
-        }
+        bool sameLength = sizeof(input) == length;
+        bool sameData = std::memcmp(&input, store.dataAt(dataOffset), sizeof(input)) == 0;
+        return sameLength && sameData;
     }
 
     // The offset to the first empty record, or the end of the sector if
@@ -305,21 +314,21 @@ public:
         return freeOffset;
     }
 
-    // TODO: write description
-    void writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
+    // Write a record to the first empty space available in a sector
+    //
+    // Returns false when write was unsuccessful to protect against
+    // marginal erase, true on proper write
+    bool writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
     {
         uintptr_t freeOffset = findEmptyOffset(sector);
         size_t spaceRemaining = getSectorEnd(sector) - freeOffset;
 
         size_t recordSize = sizeof(Header) + length;
 
-        // TODO: move this check to avoid possibility of calling swapSectors within swapSectors :-S
+        // No more room for record
         if(spaceRemaining < recordSize)
         {
-            swapSectors(id);
-            // write record on new active sector
-            writeRecord(getActiveSector(), id, data, length);
-            return;
+            return false;
         }
 
         Header header = {
@@ -330,19 +339,31 @@ public:
 
         // Write header
         uintptr_t headerOffset = freeOffset;
-        store.write(headerOffset, &header, sizeof(header));
+        if(store.write(headerOffset, &header, sizeof(header)) < 0)
+        {
+            return false;
+        }
 
         // Write data
         uintptr_t dataOffset = headerOffset + sizeof(header);
-        store.write(dataOffset, data, length);
+        if(store.write(dataOffset, data, length) < 0)
+        {
+            return false;
+        }
 
         // Write final valid status
         header.status = Header::VALID;
-        store.write(freeOffset, &header, sizeof(header.status));
+        if(store.write(freeOffset, &header, sizeof(header.status)) < 0)
+        {
+            return false;
+        }
+
+        return true;
     }
 
-    // Which sector should currently be read from/written to
-    LogicalSector getActiveSector()
+    // Figure out which sector should currently be read from/written to
+    // and which one should be used as the target of the sector swap
+    void updateActiveSector()
     {
         uint16_t status1 = readSectorStatus(LogicalSector::Sector1);
         uint16_t status2 = readSectorStatus(LogicalSector::Sector2);
@@ -350,39 +371,37 @@ public:
         // Pick the first active sector
         if(status1 == SectorHeader::ACTIVE)
         {
-            return LogicalSector::Sector1;
+            activeSector = LogicalSector::Sector1;
+            alternateSector = LogicalSector::Sector2;
         }
         else if(status2 == SectorHeader::ACTIVE)
         {
-            return LogicalSector::Sector2;
-        }
-        // If the sector swap was interrupted just before the new sector
-        // was marked active, all the data was written properly so use
-        // the copy sector as the active sector
-        else if(status1 == SectorHeader::COPY && status2 == SectorHeader::INACTIVE)
-        {
-            writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
-            return LogicalSector::Sector1;
-        }
-        else if(status1 == SectorHeader::INACTIVE && status2 == SectorHeader::COPY)
-        {
-            writeSectorStatus(LogicalSector::Sector2, SectorHeader::ACTIVE);
-            return LogicalSector::Sector2;
+            activeSector = LogicalSector::Sector2;
+            alternateSector = LogicalSector::Sector1;
         }
         else
         {
-            return LogicalSector::NoSector;
+            activeSector = LogicalSector::NoSector;
+            alternateSector = LogicalSector::NoSector;
         }
+    }
+
+    // Which sector should currently be read from/written to
+    LogicalSector getActiveSector()
+    {
+        return activeSector;
     }
 
     // Which sector should be used as the target for the next swap
     LogicalSector getAlternateSector()
     {
-        return getActiveSector() == LogicalSector::Sector1 ? LogicalSector::Sector2 : LogicalSector::Sector1;
+        return alternateSector;
     }
 
     // Iterate through a sector to find the latest valid record with a
     // specified id
+    // Returns true if a record is found and puts length and data in the
+    // parameters references
     bool findRecord(uint16_t id, uint16_t &length, uintptr_t &data)
     {
         bool found = false;
@@ -502,57 +521,116 @@ public:
     }
 
     // Update the status of a sector
-    void writeSectorStatus(LogicalSector sector, uint16_t status)
+    bool writeSectorStatus(LogicalSector sector, uint16_t status)
     {
         SectorHeader header = { status };
-        store.write(getSectorStart(sector), &header, sizeof(header));
+        return store.write(getSectorStart(sector), &header, sizeof(header)) == 0;
     }
 
     // Write all valid records from the active sector to the alternate
     // sector. Erase the alternate sector if it is not already erased.
-    // 
-    // Optionally don't copy record exceptRecordId
-    void swapSectors(int32_t exceptRecordId = -1)
+    // Then write the new record to the alternate sector.
+    bool swapSectorsAndWriteRecord(uint16_t id, const void *data, uint16_t length)
     {
-        LogicalSector activeSector = getActiveSector();
-        LogicalSector alternateSector = getAlternateSector();
+        LogicalSector sourceSector = getActiveSector();
+        LogicalSector destinationSector = getAlternateSector();
 
-        // TODO: add a loop here 2 tries and validation to protect against
-        // marginal erase? If a sector was kind of erased and reads back as
-        // all 0xFF but when values are written some bits are actually 0.
-        if(!verifySector(alternateSector))
+        // loop protects against marginal erase: if a sector was kind of
+        // erased and read back as all 0xFF but when values are written
+        // some bits written as 1 actually become 0
+        for(int tries = 0; tries < 2; tries++)
         {
-            eraseSector(alternateSector);
+            if(!verifySector(destinationSector) || tries > 0)
+            {
+                eraseSector(destinationSector);
+            }
+
+            if(!writeSectorStatus(destinationSector, SectorHeader::COPY))
+            {
+                continue;
+            }
+
+            if(!copyAllRecordsToSector(sourceSector, destinationSector, id))
+            {
+                continue;
+            }
+
+            // FIXME: simulate a marginal write error. This would be
+            // hard to do automatically from the unit test...
+            //if(tries == 0)
+            //{
+            //    uint32_t garbage = 0xDEADBEEF;
+            //    store.write(getSectorStart(destinationSector) + 10, &garbage, sizeof(garbage));
+            //    continue;
+            //}
+
+            if(!writeRecord(destinationSector, id, data, length))
+            {
+                continue;
+            }
+
+            if(!writeSectorStatus(destinationSector, SectorHeader::ACTIVE))
+            {
+                continue;
+            }
+
+            if(!writeSectorStatus(sourceSector, SectorHeader::INACTIVE))
+            {
+                continue;
+            }
+
+            // Success!
+
+            updateActiveSector();
+            calculateCapacity();
+            return true;
         }
 
-        writeSectorStatus(alternateSector, SectorHeader::COPY);
-
-        copyAllRecordsToSector(activeSector, alternateSector, exceptRecordId);
-
-        writeSectorStatus(activeSector, SectorHeader::INACTIVE);
-        writeSectorStatus(alternateSector, SectorHeader::ACTIVE);
+        return false;
     }
 
     // Perform the actual copy of records during sector swap
-    void copyAllRecordsToSector(LogicalSector fromSector, LogicalSector toSector, int32_t exceptRecordId = -1)
+    bool copyAllRecordsToSector(LogicalSector sourceSector, LogicalSector destinationSector, uint16_t exceptRecordId)
     {
-        forEachValidRecord(fromSector, [&](uintptr_t offset, const Header &header)
+        bool success = true;
+        forEachValidRecord(sourceSector, [&](uintptr_t offset, const Header &header)
         {
-            if((int32_t)header.id != exceptRecordId)
+            if(header.id != exceptRecordId)
             {
                 const void *currentData = store.dataAt(offset + sizeof(header));
-                writeRecord(toSector, header.id, currentData, header.length);
+                success = success && writeRecord(destinationSector, header.id, currentData, header.length);
             }
         });
+
+        return success;
+    }
+
+    // The space currently used by all valid records
+    // This is an expensive operation if there are a lot of records so
+    // cache the result in a member variable
+    void calculateCapacity()
+    {
+        size_t partialCapacity = 0;
+        forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
+        {
+            partialCapacity += sizeof(Header) + header.length;
+        });
+
+        capacity = partialCapacity;
+    }
+
+    // Update capacity after a put or remove
+    void updateCapacity(int32_t capacityChange)
+    {
+        capacity += capacityChange;
     }
 
     // Which sector needs to be erased after a sector swap.
     LogicalSector getPendingEraseSector()
     {
-        LogicalSector alternateSector = getAlternateSector();
-        if(readSectorStatus(alternateSector) != SectorHeader::ERASED)
+        if(readSectorStatus(getAlternateSector()) != SectorHeader::ERASED)
         {
-            return alternateSector;
+            return getAlternateSector();
         }
         else
         {
@@ -562,4 +640,9 @@ public:
 
     // Hardware-dependent interface to read, erase and program memory
     Store store;
+
+protected:
+    LogicalSector activeSector;
+    LogicalSector alternateSector;
+    size_t capacity;
 };

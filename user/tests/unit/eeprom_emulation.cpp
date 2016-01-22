@@ -400,7 +400,7 @@ TEST_CASE("Put record", "[eeprom]")
 
         THEN("The next write performs a sector swap")
         {
-            uint32_t record = 0xCC;
+            uint32_t record = 0xDEADBEEF;
             REQUIRE(eeprom.put(id, record) == true);
 
             REQUIRE(eeprom.getActiveSector() == Sector2);
@@ -411,7 +411,9 @@ TEST_CASE("Put record", "[eeprom]")
     {
         // Sector2 is smaller than sector1 in this test so it's easier
         // to fill sector2
-        eeprom.swapSectors();
+        store.eraseAll();
+        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.init();
 
         uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
         uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
@@ -486,6 +488,8 @@ TEST_CASE("Used capacity", "[eeprom]")
 
     // Bad records should be ignored
     store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
+    // Simulate reset during writing
+    eeprom.init();
 
     uint8_t dummy = 0xCC;
     uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
@@ -499,12 +503,11 @@ TEST_CASE("Used capacity", "[eeprom]")
         eeprom.put(i, data);
     }
 
-    THEN("Measures capacity for valid records, except the one specified")
+    THEN("Measures capacity for valid records")
     {
-        size_t expectedCapacity = 19 * (sizeof(TestEEPROM::Header) + sizeof(data));
-        uint16_t exceptRecordId = 10;
+        size_t expectedCapacity = 20 * (sizeof(TestEEPROM::Header) + sizeof(data));
 
-        REQUIRE(eeprom.usedCapacity(exceptRecordId) == expectedCapacity);
+        REQUIRE(eeprom.usedCapacity() == expectedCapacity);
     }
 }
 
@@ -603,6 +606,20 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
         }
     }
 
+    SECTION("Sector 2 active")
+    {
+        store.eraseAll();
+        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+
+        eeprom.init();
+
+        THEN("Sector 1 remains erased, sector 2 remains active")
+        {
+            store.requireSectorStatus(SectorBase1, SECTOR_ERASED);
+            store.requireSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        }
+    }
+
     SECTION("Pending erase on sector 1")
     {
         store.eraseAll();
@@ -625,6 +642,7 @@ TEST_CASE("Clear", "[eeprom]")
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
+    eeprom.init();
     eeprom.clear();
 
     THEN("Sector 1 is active, sector 2 is erased")
@@ -671,6 +689,7 @@ TEST_CASE("Active sector", "[eeprom]")
 
     SECTION("Sector 1 erased, sector 2 erased (blank flash)")
     {
+        eeprom.updateActiveSector();
         REQUIRE(eeprom.getActiveSector() == NoSector);
     }
 
@@ -678,6 +697,8 @@ TEST_CASE("Active sector", "[eeprom]")
     {
         store.writeSectorStatus(SectorBase1, 999);
         store.writeSectorStatus(SectorBase2, 999);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == NoSector);
     }
 
@@ -686,6 +707,8 @@ TEST_CASE("Active sector", "[eeprom]")
     SECTION("Sector 1 active, sector 2 erased (normal case)")
     {
         store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector1);
     }
 
@@ -695,21 +718,27 @@ TEST_CASE("Active sector", "[eeprom]")
     {
         store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
         store.writeSectorStatus(SectorBase2, SECTOR_COPY);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector1);
     }
 
-    SECTION("Sector 1 inactive, sector 2 copy (almost completed swap)")
-    {
-        store.writeSectorStatus(SectorBase1, SECTOR_INACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_COPY);
-        REQUIRE(eeprom.getActiveSector() == Sector2);
-    }
-
-    SECTION("Sector 1 active, sector 2 inactive (completed swap, pending erase)")
+    SECTION("Sector 1 active, sector 2 active (almost completed swap)")
     {
         store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_INACTIVE);
+        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector1);
+    }
+
+    SECTION("Sector 1 inactive, sector 2 active (completed swap, pending erase)")
+    {
+        store.writeSectorStatus(SectorBase1, SECTOR_INACTIVE);
+        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
+        REQUIRE(eeprom.getActiveSector() == Sector2);
     }
 
     // Sector 2 valid
@@ -717,6 +746,8 @@ TEST_CASE("Active sector", "[eeprom]")
     SECTION("Sector 1 erased, sector 2 active (normal case)")
     {
         store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector2);
     }
 
@@ -726,21 +757,27 @@ TEST_CASE("Active sector", "[eeprom]")
     {
         store.writeSectorStatus(SectorBase1, SECTOR_COPY);
         store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector2);
     }
 
-    SECTION("Sector 1 copy, sector 2 inactive (almost completed swap)")
+    SECTION("Sector 1 active, sector 2 active (almost completed swap)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_COPY);
-        store.writeSectorStatus(SectorBase2, SECTOR_INACTIVE);
+        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
+
         REQUIRE(eeprom.getActiveSector() == Sector1);
     }
 
-    SECTION("Sector 1 inactive, sector 2 active (completed swap, pending erase)")
+    SECTION("Sector 1 active, sector 2 inactive (completed swap, pending erase)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_INACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        REQUIRE(eeprom.getActiveSector() == Sector2);
+        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        store.writeSectorStatus(SectorBase2, SECTOR_INACTIVE);
+        eeprom.updateActiveSector();
+
+        REQUIRE(eeprom.getActiveSector() == Sector1);
     }
 }
 
@@ -754,6 +791,7 @@ TEST_CASE("Alternate sector", "[eeprom]")
     SECTION("Sector 1 is active")
     {
         store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
 
         REQUIRE(eeprom.getAlternateSector() == Sector2);
     }
@@ -761,6 +799,7 @@ TEST_CASE("Alternate sector", "[eeprom]")
     SECTION("Sector 2 is active")
     {
         store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
 
         REQUIRE(eeprom.getAlternateSector() == Sector1);
     }
@@ -780,6 +819,7 @@ TEST_CASE("Copy records to sector", "[eeprom]")
     uint32_t alternateOffset = SectorBase2 + 2;
     auto fromSector = Sector1;
     auto toSector = Sector2;
+    uint16_t exceptRecordId = 0xFFFF;
 
     SECTION("Single record")
     {
@@ -787,7 +827,7 @@ TEST_CASE("Copy records to sector", "[eeprom]")
         uint8_t record = 0xBB;
         activeOffset = store.writeRecord(activeOffset, recordId, record);
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector);
+        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
 
         THEN("The record is copied")
         {
@@ -804,7 +844,7 @@ TEST_CASE("Copy records to sector", "[eeprom]")
         uint8_t newRecord = 0xCC;
         activeOffset = store.writeRecord(activeOffset, recordId, newRecord);
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector);
+        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
 
         THEN("The latest record is copied")
         {
@@ -821,11 +861,31 @@ TEST_CASE("Copy records to sector", "[eeprom]")
         activeOffset = store.writeRecord(activeOffset, recordIds[1], record);
         activeOffset = store.writeRecord(activeOffset, recordIds[2], record);
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector);
+        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
 
         THEN("The records are copied from small ids to large ids")
         {
             alternateOffset = store.requireValidRecord(alternateOffset, recordIds[1], record);
+            alternateOffset = store.requireValidRecord(alternateOffset, recordIds[0], record);
+            alternateOffset = store.requireValidRecord(alternateOffset, recordIds[2], record);
+        }
+    }
+
+    SECTION("Except a specified record")
+    {
+        uint16_t recordIds[] = { 30, 10, 40 };
+        uint32_t record = 0xDEADBEEF;
+
+        activeOffset = store.writeRecord(activeOffset, recordIds[0], record);
+        activeOffset = store.writeRecord(activeOffset, recordIds[1], record);
+        activeOffset = store.writeRecord(activeOffset, recordIds[2], record);
+
+        exceptRecordId = 10;
+
+        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
+
+        THEN("The specified record is not copied")
+        {
             alternateOffset = store.requireValidRecord(alternateOffset, recordIds[0], record);
             alternateOffset = store.requireValidRecord(alternateOffset, recordIds[2], record);
         }
@@ -845,13 +905,37 @@ TEST_CASE("Swap sectors", "[eeprom]")
     // Write some data
     uint16_t recordId = 100;
     uint8_t record = 0xBB;
-    store.writeRecord(activeOffset + 2, recordId, record);
+    eeprom.put(recordId, record);
+
+    // Have a record to write after the swap
+    uint16_t newRecordId = 200;
+    uint8_t newRecord = 0xCC;
+
+    auto requireSwapCompleted = [&]()
+    {
+        store.requireSectorStatus(activeOffset, SECTOR_INACTIVE);
+        store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
+        store.requireValidRecord(alternateOffset + 2, recordId, record);
+    };
+
+    auto performSwap = [&]()
+    {
+        eeprom.swapSectorsAndWriteRecord(newRecordId, &newRecord, sizeof(newRecord));
+    };
+
+    SECTION("No interruption")
+    {
+        performSwap();
+
+        requireSwapCompleted();
+    }
 
     SECTION("Interrupted sector swap 1: during erase")
     {
         store.writeSectorStatus(alternateOffset, SECTOR_INACTIVE);
         eeprom.store.setWriteCount(0);
-        eeprom.swapSectors();
+
+        performSwap();
 
         // Verify that the alternate sector is not yet erased
         store.requireSectorStatus(alternateOffset, SECTOR_INACTIVE);
@@ -859,17 +943,17 @@ TEST_CASE("Swap sectors", "[eeprom]")
         THEN("Redoing the sector swap works")
         {
             eeprom.store.setWriteCount(INT_MAX);
-            eeprom.swapSectors();
 
-            store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
-            store.requireValidRecord(alternateOffset + 2, recordId, record);
+            performSwap();
+
+            requireSwapCompleted();
         }
     }
 
     SECTION("Interrupted sector swap 2: during copy")
     {
         eeprom.store.setWriteCount(2);
-        eeprom.swapSectors();
+        eeprom.swapSectorsAndWriteRecord(newRecordId, &newRecord, sizeof(newRecord));
 
         // Verify that the alternate sector is still copy
         store.requireSectorStatus(alternateOffset, SECTOR_COPY);
@@ -877,30 +961,28 @@ TEST_CASE("Swap sectors", "[eeprom]")
         THEN("Redoing the sector swap works")
         {
             eeprom.store.setWriteCount(INT_MAX);
-            eeprom.swapSectors();
 
-            store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
-            store.requireValidRecord(alternateOffset + 2, recordId, record);
+            performSwap();
+
+            requireSwapCompleted();
         }
     }
 
-    SECTION("Interrupted sector swap 3: before new sector activation")
+    SECTION("Interrupted sector swap 3: before old sector becomes inactive")
     {
-        eeprom.store.setWriteCount(5);
-        eeprom.swapSectors();
+        eeprom.store.setWriteCount(8);
 
-        // Verify that the alternate sector is still copy and active sector is already inactive
-        store.requireSectorStatus(alternateOffset, SECTOR_COPY);
-        store.requireSectorStatus(activeOffset, SECTOR_INACTIVE);
+        performSwap();
 
-        THEN("Swapped sector becomes the active sector")
+        // Verify that both sectors are active
+        store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
+        store.requireSectorStatus(activeOffset, SECTOR_ACTIVE);
+
+        THEN("Sector 1 remains the active sector")
         {
             eeprom.store.setWriteCount(INT_MAX);
 
-            REQUIRE(eeprom.getActiveSector() == Sector2);
-
-            store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
-            store.requireValidRecord(alternateOffset + 2, recordId, record);
+            REQUIRE(eeprom.getActiveSector() == Sector1);
         }
     }
 }
@@ -918,6 +1000,7 @@ TEST_CASE("Erasable sector", "[eeprom]")
     SECTION("One active sector, one erased sector")
     {
         store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
 
         THEN("No sector needs to be erased")
         {
@@ -930,6 +1013,7 @@ TEST_CASE("Erasable sector", "[eeprom]")
     {
         store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
         store.writeSectorStatus(alternateOffset, SECTOR_INACTIVE);
+        eeprom.updateActiveSector();
 
         THEN("The old sector needs to be erased")
         {
@@ -946,12 +1030,13 @@ TEST_CASE("Erasable sector", "[eeprom]")
         }
     }
 
-    SECTION("One copy sector, one inactive sector")
+    SECTION("2 active sectors")
     {
-        store.writeSectorStatus(activeOffset, SECTOR_COPY);
-        store.writeSectorStatus(alternateOffset, TestEEPROM::SectorHeader::INACTIVE);
+        store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
+        store.writeSectorStatus(alternateOffset, SECTOR_ACTIVE);
+        eeprom.updateActiveSector();
 
-        THEN("The copy sector is marked active and the other sector needs to be erased")
+        THEN("Sector 2 needs to be erased")
         {
             REQUIRE(eeprom.getPendingEraseSector() == Sector2);
             REQUIRE(eeprom.hasPendingErase() == true);
