@@ -22,7 +22,6 @@
 
 #include <stddef.h>
 #include <cstring>
-#include "catch.hpp"
 
 // FIXME: Remove this comment implementation is done
 // terminology: use sector, not page or block
@@ -263,7 +262,7 @@ public:
 
     /* Implementation */
 
-    constexpr uintptr_t getSectorStart(LogicalSector sector)
+    uintptr_t getSectorStart(LogicalSector sector)
     {
         switch(sector)
         {
@@ -273,7 +272,7 @@ public:
         }
     }
 
-    constexpr uintptr_t getSectorEnd(LogicalSector sector)
+    uintptr_t getSectorEnd(LogicalSector sector)
     {
         switch(sector)
         {
@@ -283,7 +282,7 @@ public:
         }
     }
 
-    constexpr uintptr_t getSectorSize(LogicalSector sector)
+    uintptr_t getSectorSize(LogicalSector sector)
     {
         switch(sector)
         {

@@ -1,12 +1,15 @@
 /**
  ******************************************************************************
- * @file    eeprom_hal.h
- * @author  Satish Nair, Brett Walach
+ * @file    eeprom_hal.c
+ * @author  Satish Nair
  * @version V1.0.0
- * @date    12-Sept-2014
+ * @date    18-Nov-2014
  * @brief
  ******************************************************************************
   Copyright (c) 2013-2015 Particle Industries, Inc.  All rights reserved.
+
+  Copyright 2012 STMicroelectronics
+  http://www.st.com/software_license_agreement_liberty_v2
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -23,34 +26,6 @@
  ******************************************************************************
  */
 
-/* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __EEPROM_HAL_H
-#define __EEPROM_HAL_H
+#include "eeprom_hal.h"
+#include "eeprom_emulation_impl.h"
 
-#include <stdint.h>
-#include <stddef.h>
-
-/* Includes ------------------------------------------------------------------*/
-
-/* Exported types ------------------------------------------------------------*/
-
-/* Exported constants --------------------------------------------------------*/
-
-/* Exported macros -----------------------------------------------------------*/
-/* Exported functions --------------------------------------------------------*/
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
-void HAL_EEPROM_Init(void);
-uint8_t HAL_EEPROM_Read(uint32_t address);
-void HAL_EEPROM_Write(uint32_t address, uint8_t data);
-size_t HAL_EEPROM_Length();
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif  /* __EEPROM_HAL_H */

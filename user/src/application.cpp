@@ -35,6 +35,11 @@ SYSTEM_MODE(AUTOMATIC);
 /* This function is called once at start up ----------------------------------*/
 void setup()
 {
+    uint8_t resetCounter;
+    EEPROM.get(0, resetCounter);
+    resetCounter++;
+    EEPROM.put(0, resetCounter);
+    
     //Setup the Tinker application here
 
     //Register all the Tinker functions
