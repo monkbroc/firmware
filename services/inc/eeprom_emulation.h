@@ -23,16 +23,34 @@
 #include <stddef.h>
 #include <cstring>
 
-// FIXME: Remove this comment implementation is done
+// FIXME: Remove this comment when implementation is done
 // terminology: use sector, not page or block
 //              use offset, not address
 //              use uintptr_t for offset, size_t for sector sizes
+//
+// FIXME: Different address space
 
-// TODO: think about alignment of records, and the impact
-// FLASH_ProgramHalfWord / FLASH_ProgramByte on the robustness
-// ==> Conclusion: No impact.
+// For discussion
+// - Flash programming failure mode: marginal write errors (reset while
+// erasing or writing, reads as 1 but true state is between 0 and 1) ->
+// reprogram with same value works, but different value may fail.
+//
+// - Present record layout
+// - Present incomplete record write recovery strategy
+// - Present incomplete sector swap recovery strategy
+// - Present pending sector erase
+// - store.read instead of store.dataAt because of misaligned data
+//   (misalignment of records, and use of FLASH_ProgramWord / FLASH_ProgramByte has no impact on the robustness)
+// - cache capacity because it's O(n^2) to calculate (don't do it before each put)
+// - impact of different sector sizes
+// - testing strategy with writing partial records/validating raw EEPROM
+// - Plan for migration: leave old sector alone and start writing on new sector
+// - Expanded API: get, put, clear, remove, countRecords, listRecords (maybe also recordSize), capacity, pending erase
+// - Current Wiring implementation calls HAL_EEPROM_Init on first usage (great!)
+// - Question: expectations/contract of the Wiring EEPROM API (100% backwards compatible with earlier Arduino core releases): iterator, length, record id vs logical address, return type of get/put
+// - TODO: migration, on-device integration tests, dynalib, Wiring API, user documentation, simple endurance benchmarks
 
-// TODO: add API to support external iteration through valid records
+// - TODO: get returns the size of the data read or -1 if not found. Zero in input struct before reading
 
 template <typename Store, uintptr_t SectorBase1, size_t SectorSize1, uintptr_t SectorBase2, size_t SectorSize2>
 class EEPROMEmulation
@@ -91,6 +109,7 @@ public:
             clear();
         }
 
+        // FIXME: remove
         // If there's a pending erase after a sector swap, do it at boot
         performPendingErase();
 
@@ -99,16 +118,15 @@ public:
 
     // Read the latest value of a record
     // Returns false if the records was not found, true if read
-    template <typename T>
-    bool get(uint16_t id, T& output)
+    bool get(uint16_t id, void *output, size_t outputLength)
     {
         uint16_t length;
         uintptr_t dataOffset;
         if(findRecord(id, length, dataOffset))
         {
-            if(length == sizeof(output))
+            if(length == outputLength)
             {
-                store.read(dataOffset, &output, sizeof(output));
+                store.read(dataOffset, output, outputLength);
                 return true;
             }
             // TODO
@@ -118,20 +136,26 @@ public:
         return false;
     }
 
+    // Convenience read for a record of known size
+    template <typename T>
+    bool get(uint16_t id, T& output)
+    {
+        return get(id, &output, sizeof(output));
+    }
+
     // Writes a new value for a record
     // Performs a sector swap (move all valid records to a new sector)
     // if the current sector is full
     // Returns false if there is not enough capacity to write this
     // record (even after a sector swap), true if record was written
-    template <typename T>
-    bool put(uint16_t id, const T& input)
+    bool put(uint16_t id, const void *input, size_t inputLength)
     {
         // Don't create a new record if identical to previous record
         uint16_t previousLength = 0;
         uintptr_t dataOffset = 0;
         if(findRecord(id, previousLength, dataOffset))
         {
-            if(identicalValues(input, previousLength, dataOffset))
+            if(identicalValues(input, inputLength, previousLength, dataOffset))
             {
                 return true;
             }
@@ -139,7 +163,7 @@ public:
             updateCapacity(-previousRecordSize);
         }
 
-        size_t recordSize = sizeof(Header) + sizeof(input);
+        size_t recordSize = sizeof(Header) + inputLength;
 
         // If the new record wouldn't fit even if the current record
         // were to be removed from the storage by a page swap
@@ -148,13 +172,20 @@ public:
             return false;
         }
 
-        if(!writeRecord(getActiveSector(), id, &input, sizeof(input)))
+        if(!writeRecord(getActiveSector(), id, input, inputLength))
         {
-            return swapSectorsAndWriteRecord(id, &input, sizeof(input));
+            return swapSectorsAndWriteRecord(id, input, inputLength);
         }
 
         updateCapacity(recordSize);
         return true;
+    }
+
+    // Convenience write for a record of known size
+    template <typename T>
+    bool put(uint16_t id, const T& input)
+    {
+        return put(id, &input, sizeof(input));
     }
 
     // Destroys all the data 💣
@@ -293,12 +324,14 @@ public:
     }
 
     // Check if the existing value of a record matches the new value
-    template <typename T>
-    bool identicalValues(const T& input, uint16_t length, uintptr_t dataOffset)
+    bool identicalValues(const void *input, uint16_t inputLength, uint16_t recordLength, uintptr_t dataOffset)
     {
-        bool sameLength = sizeof(input) == length;
-        bool sameData = std::memcmp(&input, store.dataAt(dataOffset), sizeof(input)) == 0;
-        return sameLength && sameData;
+        if(inputLength != recordLength)
+        {
+            return false;
+        }
+
+        return std::memcmp(input, store.dataAt(dataOffset), inputLength) == 0;
     }
 
     // The offset to the first empty record, or the end of the sector if
