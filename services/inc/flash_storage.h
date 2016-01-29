@@ -125,4 +125,11 @@ public:
         write_count = count;
     }
 
+    template <typename Func>
+    void discardWritesAfter(int count, Func f)
+    {
+        setWriteCount(count);
+        f();
+        setWriteCount(INT_MAX);
+    }
 };
