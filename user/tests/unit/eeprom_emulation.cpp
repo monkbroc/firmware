@@ -6,29 +6,28 @@
 #include "eeprom_emulation.h"
 #include "flash_storage.h"
 
-const size_t TestSectorSize = 0x4000;
-const uint8_t TestSectorCount = 2;
+const size_t TestPageSize = 0x4000;
+const uint8_t TestPageCount = 2;
 const uintptr_t TestBase = 0xC000;
 
-/* Simulate 2 Flash sectors of different sizes used for EEPROM emulation */
-const uintptr_t SectorBase1 = TestBase;
-const size_t SectorSize1 = TestSectorSize;
-const uintptr_t SectorBase2 = TestBase + TestSectorSize;
-const size_t SectorSize2 = TestSectorSize / 4;
+/* Simulate 2 Flash pages of different sizes used for EEPROM emulation */
+const uintptr_t PageBase1 = TestBase;
+const size_t PageSize1 = TestPageSize;
+const uintptr_t PageBase2 = TestBase + TestPageSize;
+const size_t PageSize2 = TestPageSize / 4;
 
-using TestStore = RAMFlashStorage<TestBase, TestSectorCount, TestSectorSize>;
-using TestEEPROM = EEPROMEmulation<TestStore, SectorBase1, SectorSize1, SectorBase2, SectorSize2>;
+using TestStore = RAMFlashStorage<TestBase, TestPageCount, TestPageSize>;
+using TestEEPROM = EEPROMEmulationByte<TestStore, PageBase1, PageSize1, PageBase2, PageSize2>;
 
 // Alias some constants, otherwise the linker is having issues when
 // those are used inside REQUIRE() tests
-auto NoSector = TestEEPROM::LogicalSector::NoSector;
-auto Sector1 = TestEEPROM::LogicalSector::Sector1;
-auto Sector2 = TestEEPROM::LogicalSector::Sector2;
+auto NoPage = TestEEPROM::LogicalPage::NoPage;
+auto Page1 = TestEEPROM::LogicalPage::Page1;
+auto Page2 = TestEEPROM::LogicalPage::Page2;
 
-auto SECTOR_ERASED = TestEEPROM::SectorHeader::ERASED;
-auto SECTOR_COPY = TestEEPROM::SectorHeader::COPY;
-auto SECTOR_ACTIVE = TestEEPROM::SectorHeader::ACTIVE;
-auto SECTOR_INACTIVE = TestEEPROM::SectorHeader::INACTIVE;
+auto PAGE_ERASED = TestEEPROM::PageHeader::ERASED;
+auto PAGE_COPY = TestEEPROM::PageHeader::COPY;
+auto PAGE_ACTIVE = TestEEPROM::PageHeader::ACTIVE;
 
 // Decorator class for RAMFlashStorage to pre-write EEPROM records or
 // validate written records
@@ -43,119 +42,78 @@ public:
 
     void eraseAll()
     {
-        store.eraseSector(SectorBase1);
-        store.eraseSector(SectorBase2);
+        store.eraseSector(PageBase1);
+        store.eraseSector(PageBase2);
     }
 
-    void writeSectorStatus(uintptr_t offset, uint16_t status)
+    uintptr_t recordOffset(uintptr_t baseOffset, uint16_t recordId)
+    {
+        // Page header is 2 bytes, each record is 4 bytes
+        return baseOffset + 2 + 4 * recordId;
+    }
+
+    void writePageStatus(uintptr_t offset, uint16_t status)
     {
         store.write(offset, &status, sizeof(status));
     }
 
-    uint16_t readSectorStatus(uintptr_t offset)
+    uint16_t readPageStatus(uintptr_t offset)
     {
         uint16_t status;
         store.read(offset, &status, sizeof(status));
         return status;
     }
 
-    void requireSectorStatus(uintptr_t offset, uint16_t expectedStatus)
+    void requirePageStatus(uintptr_t offset, uint16_t expectedStatus)
     {
-        REQUIRE(readSectorStatus(offset) == expectedStatus);
+        REQUIRE(readPageStatus(offset) == expectedStatus);
     }
 
-    // Interrupted record write 1: status written as invalid, but id,
-    // length, data not written
-    template <typename T>
-    uintptr_t writeInvalidRecord(uintptr_t offset, uint16_t id, const T& record)
+    // Interrupted record write 1: id, invalid status and data written
+    uintptr_t writeInvalidRecord(uintptr_t offset, uint16_t id, uint8_t data)
     {
-        TestEEPROM::Header header = {
-            TestEEPROM::Header::INVALID,
-            0,
-            0
-        };
+        TestEEPROM::Record record(TestEEPROM::Record::INVALID, id, data);
+        store.write(offset, &record, sizeof(record));
 
-        store.write(offset, &header, sizeof(header.status));
-        // Next record should be written directly after the invalid header
-        return offset + sizeof(TestEEPROM::Header);
-    }
-
-    // Interrupted record write 2: status written as invalid, id, length
-    // written, but data not written
-    template <typename T>
-    uintptr_t writeRecordHeader(uintptr_t offset, uint16_t id, const T& record)
-    {
-        TestEEPROM::Header header = {
-            TestEEPROM::Header::INVALID,
-            sizeof(record),
-            id
-        };
-
-        store.write(offset, &header, sizeof(header));
-        // Next record should be written after the invalid header and partial data
-        return offset + sizeof(header) + sizeof(record);
-    }
-
-    // Interrupted record write 3: status written as invalid, id, length
-    // written, data partially written
-    template <typename T>
-    uintptr_t writePartialRecord(uintptr_t offset, uint16_t id, const T& record)
-    {
-        TestEEPROM::Header header = {
-            TestEEPROM::Header::INVALID,
-            sizeof(record),
-            id
-        };
-
-        store.write(offset, &header, sizeof(header));
-        offset += sizeof(header);
-        // write only 1 byte
-        store.write(offset, &record, 1);
-
-        // Next record should be written after the invalid header and partial data
         return offset + sizeof(record);
     }
 
     // Completely written record
-    template <typename T>
-    uintptr_t writeRecord(uintptr_t offset, uint16_t id, const T& record)
+    uintptr_t writeRecord(uintptr_t offset, uint16_t id, uint8_t data)
     {
-        TestEEPROM::Header header = {
-            TestEEPROM::Header::VALID,
-            sizeof(record),
-            id
-        };
-
-        store.write(offset, &header, sizeof(header));
-        offset += sizeof(header);
+        TestEEPROM::Record record(TestEEPROM::Record::VALID, id, data);
         store.write(offset, &record, sizeof(record));
 
-        // Next record should be written after the header and data
         return offset + sizeof(record);
     }
 
     // Validates that a specific record was correctly written at the specified offset
-    template <typename T>
-    uintptr_t requireValidRecord(uintptr_t offset, uint16_t id, const T& expected)
+    uintptr_t requireValidRecord(uintptr_t offset, uint16_t id, uint8_t expected)
     {
-        auto status = TestEEPROM::Header::VALID;
-        REQUIRE(std::memcmp(store.dataAt(offset), &status, sizeof(status)) == 0);
-        offset += sizeof(status);
+        TestEEPROM::Record record;
+        store.read(offset, &record, sizeof(record));
 
-        uint16_t length = sizeof(expected);
-        REQUIRE(std::memcmp(store.dataAt(offset), &length, sizeof(length)) == 0);
-        offset += sizeof(length);
+        auto status = TestEEPROM::Record::VALID;
+        REQUIRE(record.status == status);
+        REQUIRE(record.id == id);
+        REQUIRE(record.data == expected);
 
-        REQUIRE(std::memcmp(store.dataAt(offset), &id, sizeof(id)) == 0);
-        offset += sizeof(id);
+        return offset + sizeof(record);
+    }
 
-        REQUIRE(std::memcmp(store.dataAt(offset), &expected, sizeof(expected)) == 0);
-        return offset + sizeof(expected);
+    // Validate that a specific offset has no record (erased space)
+    uintptr_t requireEmptyRecord(uintptr_t offset)
+    {
+        TestEEPROM::Record erasedRecord, record;
+        store.read(offset, &record, sizeof(record));
+        REQUIRE(std::memcmp(&record, &erasedRecord, sizeof(record)) == 0);
+
+        return offset + sizeof(record);
     }
 
     // Debugging helper to view the storage contents
     // Usage:
-    // WARN(store.dumpStorage(SectorBase1, 30));
+    // WARN(store.dumpStorage(PageBase1, 30));
     std::string dumpStorage(uintptr_t offset, uint16_t length)
     {
         std::stringstream ss;
@@ -172,106 +130,252 @@ public:
     }
 };
 
-TEST_CASE("Get record", "[eeprom]")
+TEST_CASE("Get byte", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
 
     eeprom.init();
 
-    uint32_t offset = SectorBase1 + 2;
     uint8_t value;
+    uint16_t recordId = 10;
 
-    SECTION("The record doesn't exist")
+    SECTION("The address was not programmed")
     {
-        uint16_t recordId = 999;
         SECTION("No other records")
         {
-            THEN("get returns false")
+            THEN("get returns the value as erased")
             {
-                REQUIRE(eeprom.get(recordId, value) == false);
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xFF);
             }
         }
 
-        SECTION("With bad records")
+        SECTION("With other records")
         {
-            uint8_t badRecord[] = { 0xCC, 0xDD };
-            offset = store.writeInvalidRecord(offset, recordId, badRecord);
-            offset = store.writeRecordHeader(offset, recordId, badRecord);
-            offset = store.writePartialRecord(offset, recordId, badRecord);
+            eeprom.put(0, 0xAA);
 
-            THEN("get returns false")
+            THEN("get returns the value as erased")
             {
-                REQUIRE(eeprom.get(recordId, value) == false);
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xFF);
+            }
+        }
+
+        SECTION("With a partially written record")
+        {
+            eeprom.store.discardWritesAfter(1, [&] {
+                eeprom.put(recordId, 0xEE);
+            });
+
+            THEN("get returns the value as erased")
+            {
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xFF);
             }
         }
     }
 
-    SECTION("A bad record exists")
+    SECTION("The address was programmed")
+    {
+        eeprom.put(recordId, 0xCC);
+
+        SECTION("No other records")
+        {
+            THEN("get extracts the value")
+            {
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xCC);
+            }
+        }
+
+        SECTION("Followed by a partially written record")
+        {
+            eeprom.store.discardWritesAfter(1, [&] {
+                eeprom.put(recordId, 0xEE);
+            });
+
+            THEN("get extracts the last valid value")
+            {
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xCC);
+            }
+        }
+
+        SECTION("Followed by a fully written record")
+        {
+            eeprom.put(recordId, 0xEE);
+
+            THEN("get extracts the new valid value")
+            {
+                eeprom.get(recordId, value);
+                REQUIRE(value == 0xEE);
+            }
+        }
+
+    }
+
+    SECTION("The address was programmed by a multi-byte put")
     {
         uint16_t recordId = 0;
-        uint8_t badRecord = 0xCC;
+        uint8_t values[] = { 1, 2, 3 };
 
-        SECTION("invalid record")
+        eeprom.put(recordId, values, sizeof(values));
+
+        THEN("get extracts the value")
         {
-            offset = store.writeInvalidRecord(offset, recordId, badRecord);
+            eeprom.get(recordId, value);
+            REQUIRE(value == 1);
+        }
+    }
 
-            THEN("get returns false")
+    SECTION("The address is out of range")
+    {
+        THEN("get returns the value as erased")
+        {
+            eeprom.get(65000, value);
+            REQUIRE(value == 0xFF);
+        }
+    }
+}
+
+TEST_CASE("Get multi-byte", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    eeprom.init();
+
+    uint16_t recordId = 10;
+    uint8_t values[3];
+    auto requireValues = [&](uint8_t v1, uint8_t v2, uint8_t v3)
+    {
+        REQUIRE(values[0] == v1);
+        REQUIRE(values[1] == v2);
+        REQUIRE(values[2] == v3);
+    };
+
+    SECTION("The addresses were not programmed")
+    {
+        SECTION("No other records")
+        {
+            THEN("get returns the values as erased")
             {
-                REQUIRE(eeprom.get(recordId, value) == false);
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(0xFF, 0xFF, 0xFF);
             }
         }
 
-        SECTION("missing data")
+        SECTION("With other records")
         {
-            offset = store.writeRecordHeader(offset, recordId, badRecord);
+            eeprom.put(0, 0xAA);
 
-            THEN("get returns false")
+            THEN("get returns the values as erased")
             {
-                REQUIRE(eeprom.get(recordId, value) == false);
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(0xFF, 0xFF, 0xFF);
             }
         }
 
-        SECTION("partial data")
+        SECTION("With a partially written block of records")
         {
-            offset = store.writePartialRecord(offset, recordId, badRecord);
+            // It takes 6 writes to write the 3 data records, followed
+            // by the 3 valid statuses, so discard everything after the
+            // first invalid record write
+            eeprom.store.discardWritesAfter(1, [&] {
+                uint8_t partialValues[] = { 1, 2, 3 };
+                eeprom.put(recordId, partialValues, sizeof(partialValues));
+            });
 
-            THEN("get returns false")
+            THEN("get returns the values as erased")
             {
-                REQUIRE(eeprom.get(recordId, value) == false);
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(0xFF, 0xFF, 0xFF);
+            }
+        }
+
+        SECTION("With a partially validated block of records")
+        {
+            // It takes 6 writes to write the 3 data records, followed
+            // by the 3 valid statuses, so discard the 6th write
+            eeprom.store.discardWritesAfter(5, [&] {
+                uint8_t partialValues[] = { 1, 2, 3 };
+                eeprom.put(recordId, partialValues, sizeof(partialValues));
+            });
+
+            THEN("get returns the values as erased")
+            {
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(0xFF, 0xFF, 0xFF);
             }
         }
     }
 
-    SECTION("The record exists")
+    SECTION("The addresses were programmed")
     {
-        uint16_t recordId = 0;
-        uint8_t record = 0xCC;
+        uint8_t previousValues[] = { 10, 20, 30 };
+
+        eeprom.put(recordId, previousValues, sizeof(values));
 
         SECTION("No other records")
         {
-            offset = store.writeRecord(offset, recordId, record);
-
-            THEN("get returns true and extracts the value")
+            THEN("get returns the values as previously programmed")
             {
-                REQUIRE(eeprom.get(recordId, value) == true);
-                REQUIRE(value == 0xCC);
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(10, 20, 30);
             }
         }
 
-        SECTION("With bad records")
+        SECTION("With other records")
         {
-            uint8_t badRecord[] = { 0xDD, 0xEE };
-            offset = store.writeInvalidRecord(offset, recordId, badRecord);
-            offset = store.writeRecordHeader(offset, recordId, badRecord);
-            offset = store.writePartialRecord(offset, recordId, badRecord);
+            eeprom.put(0, 0xAA);
 
-            offset = store.writeRecord(offset, recordId, record);
-
-            THEN("get returns true and extracts the value")
+            THEN("get returns the values as previously programmed")
             {
-                REQUIRE(eeprom.get(recordId, value) == true);
-                REQUIRE(value == 0xCC);
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(10, 20, 30);
+            }
+        }
+
+        SECTION("With a partially written block of records")
+        {
+            // It takes 4 writes to write the 2 data records, followed
+            // by the 2 valid statuses, so discard everything after the
+            // first invalid record write
+            eeprom.store.discardWritesAfter(1, [&] {
+                uint8_t partialValues[] = { 2, 3 };
+                eeprom.put(recordId + 1, partialValues, sizeof(partialValues));
+            });
+
+            THEN("get returns the values as previously programmed")
+            {
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(10, 20, 30);
+            }
+        }
+
+        SECTION("With a partially validated block of records")
+        {
+            // It takes 4 writes to write the 2 data records, followed
+            // by the 2 valid statuses, so discard the 4th write
+            eeprom.store.discardWritesAfter(3, [&] {
+                uint8_t partialValues[] = { 2, 3 };
+                eeprom.put(recordId + 1, partialValues, sizeof(partialValues));
+            });
+
+            THEN("get returns the values as previously programmed")
+            {
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(10, 20, 30);
+            }
+        }
+
+        SECTION("With a fully written block of records")
+        {
+            uint8_t newValues[] = { 2, 3 };
+            eeprom.put(recordId + 1, newValues, sizeof(newValues));
+
+            THEN("get returns the new values")
+            {
+                eeprom.get(recordId, values, sizeof(values));
+                requireValues(10, 2, 3);
             }
         }
     }
@@ -284,288 +388,135 @@ TEST_CASE("Put record", "[eeprom]")
 
     eeprom.init();
 
-    uint32_t offset = SectorBase1 + 2;
+    uint16_t recordId = 0;
 
     SECTION("The record doesn't exist")
     {
-        uint16_t recordId = 0;
-        uint8_t record = 0xDD;
-
-        THEN("put returns true and creates the record")
+        THEN("put creates the record")
         {
-            REQUIRE(eeprom.put(recordId, record) == true);
-            store.requireValidRecord(offset, recordId, record);
+            eeprom.put(recordId, 0xCC);
+
+            uint32_t offset = store.recordOffset(PageBase1, 0);
+            store.requireValidRecord(offset, recordId, 0xCC);
         }
 
         THEN("get returns the put record")
         {
-            eeprom.put(recordId, record);
+            eeprom.put(recordId, 0xCC);
+
             uint8_t newRecord;
-            REQUIRE(eeprom.get(recordId, newRecord) == true);
-            REQUIRE(newRecord == 0xDD);
+            eeprom.get(recordId, newRecord);
+
+            REQUIRE(newRecord == 0xCC);
         }
     }
 
     SECTION("A bad record exists")
     {
-        uint16_t recordId = 0;
-        uint8_t badRecord = 0xEE;
-        offset = store.writeRecordHeader(offset, recordId, badRecord);
+        eeprom.store.discardWritesAfter(1, [&] {
+            eeprom.put(recordId, 0xEE);
+        });
 
-        uint8_t record = 0xDD;
-
-        THEN("put returns true and creates the record")
+        THEN("put triggers a page swap")
         {
-            REQUIRE(eeprom.put(recordId, record) == true);
-            store.requireValidRecord(offset, recordId, record);
+            REQUIRE(eeprom.getActivePage() == Page1);
+
+            eeprom.put(recordId, 0xCC);
+
+            REQUIRE(eeprom.getActivePage() == Page2);
         }
 
-        THEN("get returns the put record")
+        THEN("put creates the record")
         {
-            eeprom.put(recordId, record);
+            eeprom.put(recordId, 0xCC);
+
             uint8_t newRecord;
-            REQUIRE(eeprom.get(recordId, newRecord) == true);
-            REQUIRE(newRecord == 0xDD);
+            eeprom.get(recordId, newRecord);
+
+            REQUIRE(newRecord == 0xCC);
         }
     }
 
     SECTION("The record exists")
     {
-        uint16_t recordId = 0;
-        uint8_t previousRecord = 0xCC;
+        eeprom.put(recordId, 0xCC);
 
-        offset = store.writeRecord(offset, recordId, previousRecord);
-
-        uint8_t record = 0xDD;
-
-        THEN("put returns true and creates a new copy of the record")
+        THEN("put creates a new copy of the record")
         {
-            REQUIRE(eeprom.put(recordId, record) == true);
-            store.requireValidRecord(offset, recordId, record);
+            eeprom.put(recordId, 0xDD);
+
+            uint32_t offset = store.recordOffset(PageBase1, 1);
+            store.requireValidRecord(offset, recordId, 0xDD);
         }
 
         THEN("get returns the put record")
         {
-            eeprom.put(recordId, record);
+            eeprom.put(recordId, 0xDD);
+
             uint8_t newRecord;
-            REQUIRE(eeprom.get(recordId, newRecord) == true);
+            eeprom.get(recordId, newRecord);
+
             REQUIRE(newRecord == 0xDD);
         }
     }
 
-    SECTION("The new record value is the same as current one")
+    SECTION("The new record value is the same as the current one")
     {
-        uint16_t recordId = 0;
-        uint8_t record = 0xCC;
+        eeprom.put(recordId, 0xCC);
 
-        eeprom.put(recordId, record);
+        uintptr_t originalEmptyOffset = eeprom.findEmptyOffset(eeprom.getActivePage());
 
-        uintptr_t originalEmptyOffset = eeprom.findEmptyOffset(eeprom.getActiveSector());
-
-        THEN("put returns true but doesn't create a new copy of the record")
+        THEN("put doesn't create a new copy of the record")
         {
-            REQUIRE(eeprom.put(recordId, record) == true);
+            eeprom.put(recordId, 0xCC);
 
-            uintptr_t emptyOffset = eeprom.findEmptyOffset(eeprom.getActiveSector());
+            uintptr_t emptyOffset = eeprom.findEmptyOffset(eeprom.getActivePage());
             REQUIRE(emptyOffset == originalEmptyOffset);
         }
     }
 
-    SECTION("EEPROM capacity is reached")
+    SECTION("The address is out of range")
     {
-        uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
+        uintptr_t originalEmptyOffset = eeprom.findEmptyOffset(eeprom.getActivePage());
 
-        // Write many large records until capacity is reached
-        for(uint16_t id = 0; id < 200 && eeprom.remainingCapacity() >= recordSize; id++)
+        THEN("put doesn't create a new record")
         {
-            REQUIRE(eeprom.put(id, data) == true);
-        }
+            eeprom.put(65000, 0xEE);
 
-        THEN("Additional records cannot be added if they wouldn't fit in the smallest sector")
-        {
-            REQUIRE(eeprom.put(1000, data) == false);
+            uintptr_t emptyOffset = eeprom.findEmptyOffset(eeprom.getActivePage());
+            REQUIRE(emptyOffset == originalEmptyOffset);
         }
     }
 
-    SECTION("Sector swap is required")
+    SECTION("Page swap is required")
     {
-        uint16_t recordSize = sizeof(uint32_t) + sizeof(TestEEPROM::Header);
-        uint16_t writesToFillSector1 = SectorSize1 / recordSize;
+        uint16_t writesToFillPage1 = PageSize1 / sizeof(TestEEPROM::Record) - 1;
 
-        uint16_t id = 100;
-
-        // Write multiple copies of the same record until sector 1 is full
-        for(uint32_t i = 0; i < writesToFillSector1; i++)
+        // Write multiple copies of the same record until page 1 is full
+        for(uint32_t i = 0; i < writesToFillPage1; i++)
         {
-            REQUIRE(eeprom.put(id, i) == true);
+            eeprom.put(recordId, (uint8_t)i);
         }
 
-        REQUIRE(eeprom.getActiveSector() == Sector1);
+        REQUIRE(eeprom.getActivePage() == Page1);
 
-        THEN("The next write performs a sector swap")
+        THEN("The next write performs a page swap")
         {
-            uint32_t record = 0xDEADBEEF;
-            REQUIRE(eeprom.put(id, record) == true);
+            uint8_t newRecord = 0;
+            eeprom.put(recordId, newRecord);
 
-            REQUIRE(eeprom.getActiveSector() == Sector2);
-        }
-    }
-
-    SECTION("EEPROM is near capacity and overwriting an existing record would only fit after a sector swap")
-    {
-        // Sector2 is smaller than sector1 in this test so it's easier
-        // to fill sector2
-        store.eraseAll();
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.init();
-
-        uint32_t data[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        uint16_t recordSize = sizeof(data) + sizeof(TestEEPROM::Header);
-
-        // Write many large records until there is no room for another record
-        for(uint16_t id = 0; id < 200 && eeprom.remainingCapacity() >= recordSize; id++)
-        {
-            REQUIRE(eeprom.put(id, data) == true);
-        }
-
-        REQUIRE(eeprom.getActiveSector() == Sector2);
-
-        THEN("Overwritten record is added after sector swap")
-        {
-            uint32_t data2[] = { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
-            uint16_t recordId = 0;
-            REQUIRE(eeprom.put(recordId, data2) == true);
-            REQUIRE(eeprom.getActiveSector() == Sector1);
+            REQUIRE(eeprom.getActivePage() == Page2);
         }
     }
 }
 
-
-TEST_CASE("Remove record", "[eeprom]")
+TEST_CASE("Capacity", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-    eeprom.init();
+    // Each record is 4 bytes, and some space is used by the page header
+    size_t expectedByteCapacity = PageSize2 / 4 - 1;
 
-    SECTION("The record doesn't exist")
-    {
-        uint16_t recordId = 0;
-
-        REQUIRE(eeprom.remove(recordId) == false);
-    }
-
-    SECTION("The record exists")
-    {
-        uint16_t recordId = 0;
-        uint8_t record = 0xCC;
-
-        eeprom.put(recordId, record);
-
-        THEN("remove returns true")
-        {
-            REQUIRE(eeprom.remove(recordId) == true);
-        }
-
-        THEN("get doesn't return the removed record")
-        {
-            eeprom.remove(recordId);
-
-            REQUIRE(eeprom.get(recordId, record) == false);
-        }
-    }
-}
-
-TEST_CASE("Total capacity", "[eeprom]")
-{
-    TestEEPROM eeprom;
-    size_t smallestSectorSize = TestSectorSize / 4 - sizeof(TestEEPROM::SectorHeader);
-
-    REQUIRE(eeprom.totalCapacity() == smallestSectorSize);
-}
-
-TEST_CASE("Used capacity", "[eeprom]")
-{
-    TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    eeprom.init();
-
-    // Bad records should be ignored
-    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
-    // Simulate reset during writing
-    eeprom.init();
-
-    uint8_t dummy = 0xCC;
-    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
-
-    for(uint16_t i = 0; i < 20; i++)
-    {
-        // Old records should be ignored
-        eeprom.put(i, dummy);
-
-        // Latest records should be counted
-        eeprom.put(i, data);
-    }
-
-    THEN("Measures capacity for valid records")
-    {
-        size_t expectedCapacity = 20 * (sizeof(TestEEPROM::Header) + sizeof(data));
-
-        REQUIRE(eeprom.usedCapacity() == expectedCapacity);
-    }
-}
-
-TEST_CASE("Count records", "[eeprom]")
-{
-    TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    eeprom.init();
-
-    // Bad records should be ignored
-    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
-
-    uint8_t dummy = 0xCC;
-    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
-
-    for(uint16_t i = 0; i < 20; i++)
-    {
-        // Duplicate records should be only counted once
-        eeprom.put(i, dummy);
-        eeprom.put(i, data);
-    }
-
-    REQUIRE(eeprom.countRecords() == 20);
-}
-
-
-TEST_CASE("List records", "[eeprom]")
-{
-    TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    eeprom.init();
-
-    // Bad records should be ignored
-    store.writePartialRecord(SectorBase1 + 2, 100, 0xAA);
-
-    uint8_t dummy = 0xCC;
-    uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
-
-    for(uint16_t i = 0; i < 3; i++)
-    {
-        // Duplicate records should be only counted once
-        eeprom.put(i * 2, dummy);
-        eeprom.put(i * 2, data);
-    }
-
-    uint16_t ids[5];
-    REQUIRE(eeprom.listRecords(ids, 5) == 3);
-
-    REQUIRE(ids[0] == 0);
-    REQUIRE(ids[1] == 2);
-    REQUIRE(ids[2] == 4);
+    REQUIRE(eeprom.capacity() == expectedByteCapacity);
 }
 
 TEST_CASE("Initialize EEPROM", "[eeprom]")
@@ -577,10 +528,10 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
     {
         eeprom.init();
 
-        THEN("Sector 1 is active, sector 2 is erased")
+        THEN("Page 1 is active, page 2 is erased")
         {
-            store.requireSectorStatus(SectorBase1, SECTOR_ACTIVE);
-            store.requireSectorStatus(SectorBase2, SECTOR_ERASED);
+            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
+            store.requirePageStatus(PageBase2, PAGE_ERASED);
         }
     }
 
@@ -590,56 +541,40 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
 
         eeprom.init();
 
-        THEN("Sector 1 is active, sector 2 is erased")
+        THEN("Page 1 is active, page 2 is erased")
         {
-            store.requireSectorStatus(SectorBase1, SECTOR_ACTIVE);
-            store.requireSectorStatus(SectorBase2, SECTOR_ERASED);
+            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
+            store.requirePageStatus(PageBase2, PAGE_ERASED);
         }
     }
 
-    SECTION("Sector 1 active")
+    SECTION("Page 1 active")
     {
         store.eraseAll();
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
 
         eeprom.init();
 
-        THEN("Sector 1 remains active, sector 2 remains erased")
+        THEN("Page 1 remains active, page 2 remains erased")
         {
-            store.requireSectorStatus(SectorBase1, SECTOR_ACTIVE);
-            store.requireSectorStatus(SectorBase2, SECTOR_ERASED);
+            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
+            store.requirePageStatus(PageBase2, PAGE_ERASED);
         }
     }
 
-    SECTION("Sector 2 active")
+    SECTION("Page 2 active")
     {
         store.eraseAll();
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
 
         eeprom.init();
 
-        THEN("Sector 1 remains erased, sector 2 remains active")
+        THEN("Page 1 remains erased, page 2 remains active")
         {
-            store.requireSectorStatus(SectorBase1, SECTOR_ERASED);
-            store.requireSectorStatus(SectorBase2, SECTOR_ACTIVE);
+            store.requirePageStatus(PageBase1, PAGE_ERASED);
+            store.requirePageStatus(PageBase2, PAGE_ACTIVE);
         }
     }
-
-    SECTION("Pending erase on sector 1")
-    {
-        store.eraseAll();
-        store.writeSectorStatus(SectorBase1, SECTOR_INACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-
-        eeprom.init();
-
-        THEN("Sector 1 is erased, sector 2 remains active")
-        {
-            store.requireSectorStatus(SectorBase1, SECTOR_ERASED);
-            store.requireSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        }
-    }
-
 }
 
 TEST_CASE("Clear", "[eeprom]")
@@ -650,223 +585,233 @@ TEST_CASE("Clear", "[eeprom]")
     eeprom.init();
     eeprom.clear();
 
-    THEN("Sector 1 is active, sector 2 is erased")
+    THEN("Page 1 is active, page 2 is erased")
     {
-        store.requireSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.requireSectorStatus(SectorBase2, SECTOR_ERASED);
+        store.requirePageStatus(PageBase1, PAGE_ACTIVE);
+        store.requirePageStatus(PageBase2, PAGE_ERASED);
     }
 }
 
-TEST_CASE("Verify sector", "[eeprom]")
+TEST_CASE("Verify page", "[eeprom]")
 {
     TestEEPROM eeprom;
 
     SECTION("random flash")
     {
-        REQUIRE(eeprom.verifySector(Sector1) == false);
+        REQUIRE(eeprom.verifyPage(Page1) == false);
     }
 
     SECTION("erased flash")
     {
-        eeprom.store.eraseSector(SectorBase1);
-        REQUIRE(eeprom.verifySector(Sector1) == true);
+        eeprom.store.eraseSector(PageBase1);
+        REQUIRE(eeprom.verifyPage(Page1) == true);
     }
 
     SECTION("partially erased flash")
     {
-        eeprom.store.eraseSector(SectorBase1);
+        eeprom.store.eraseSector(PageBase1);
 
         uint8_t garbage = 0xCC;
-        eeprom.store.write(SectorBase1 + 100, &garbage, sizeof(garbage));
+        eeprom.store.write(PageBase1 + 100, &garbage, sizeof(garbage));
 
-        REQUIRE(eeprom.verifySector(Sector1) == false);
+        REQUIRE(eeprom.verifyPage(Page1) == false);
     }
 }
 
-TEST_CASE("Active sector", "[eeprom]")
+TEST_CASE("Active page", "[eeprom]")
 {
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
     store.eraseAll();
 
-    // No valid sector
+    // No valid page
 
-    SECTION("Sector 1 erased, sector 2 erased (blank flash)")
+    SECTION("Page 1 erased, page 2 erased (blank flash)")
     {
-        eeprom.updateActiveSector();
-        REQUIRE(eeprom.getActiveSector() == NoSector);
+        eeprom.updateActivePage();
+        REQUIRE(eeprom.getActivePage() == NoPage);
     }
 
-    SECTION("Sector 1 garbage, sector 2 garbage (invalid state)")
+    SECTION("Page 1 garbage, page 2 garbage (invalid state)")
     {
-        store.writeSectorStatus(SectorBase1, 999);
-        store.writeSectorStatus(SectorBase2, 999);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, 999);
+        store.writePageStatus(PageBase2, 999);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == NoSector);
+        REQUIRE(eeprom.getActivePage() == NoPage);
     }
 
-    // Sector 1 valid
+    // Page 1 valid
 
-    SECTION("Sector 1 active, sector 2 erased (normal case)")
+    SECTION("Page 1 active, page 2 erased (normal case)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == Sector1);
+        REQUIRE(eeprom.getActivePage() == Page1);
     }
 
-    // Steps of swap from sector 1 to sector 2
+    // Steps of swap from page 1 to page 2
 
-    SECTION("Sector 1 active, sector 2 copy (interrupted swap)")
+    SECTION("Page 1 active, page 2 copy (interrupted swap)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_COPY);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        store.writePageStatus(PageBase2, PAGE_COPY);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == Sector1);
+        REQUIRE(eeprom.getActivePage() == Page1);
     }
 
-    SECTION("Sector 1 active, sector 2 active (almost completed swap)")
+    SECTION("Page 1 active, page 2 active (almost completed swap)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == Sector1);
+        REQUIRE(eeprom.getActivePage() == Page1);
     }
 
-    SECTION("Sector 1 inactive, sector 2 active (completed swap, pending erase)")
-    {
-        store.writeSectorStatus(SectorBase1, SECTOR_INACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+    // Page 2 valid
 
-        REQUIRE(eeprom.getActiveSector() == Sector2);
+    SECTION("Page 1 erased, page 2 active (normal case)")
+    {
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        eeprom.updateActivePage();
+
+        REQUIRE(eeprom.getActivePage() == Page2);
     }
 
-    // Sector 2 valid
+    // Steps of swap from page 2 to page 1
 
-    SECTION("Sector 1 erased, sector 2 active (normal case)")
+    SECTION("Page 1 copy, page 2 active (interrupted swap)")
     {
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_COPY);
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == Sector2);
+        REQUIRE(eeprom.getActivePage() == Page2);
     }
 
-    // Steps of swap from sector 2 to sector 1
-
-    SECTION("Sector 1 copy, sector 2 active (interrupted swap)")
+    SECTION("Page 1 active, page 2 active (almost completed swap)")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_COPY);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getActiveSector() == Sector2);
-    }
-
-    SECTION("Sector 1 active, sector 2 active (almost completed swap)")
-    {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
-
-        REQUIRE(eeprom.getActiveSector() == Sector1);
-    }
-
-    SECTION("Sector 1 active, sector 2 inactive (completed swap, pending erase)")
-    {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        store.writeSectorStatus(SectorBase2, SECTOR_INACTIVE);
-        eeprom.updateActiveSector();
-
-        REQUIRE(eeprom.getActiveSector() == Sector1);
+        REQUIRE(eeprom.getActivePage() == Page1);
     }
 }
 
-TEST_CASE("Alternate sector", "[eeprom]")
+TEST_CASE("Alternate page", "[eeprom]")
 {
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
     store.eraseAll();
 
-    SECTION("Sector 1 is active")
+    SECTION("Page 1 is active")
     {
-        store.writeSectorStatus(SectorBase1, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getAlternateSector() == Sector2);
+        REQUIRE(eeprom.getAlternatePage() == Page2);
     }
 
-    SECTION("Sector 2 is active")
+    SECTION("Page 2 is active")
     {
-        store.writeSectorStatus(SectorBase2, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
+        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        eeprom.updateActivePage();
 
-        REQUIRE(eeprom.getAlternateSector() == Sector1);
+        REQUIRE(eeprom.getAlternatePage() == Page1);
     }
 
-    // Not necessary to test when no sector is active since that
+    // Not necessary to test when no page is active since that
     // condition will be fixed at boot in init()
 }
 
-TEST_CASE("Copy records to sector", "[eeprom]")
+TEST_CASE("Copy records to page", "[eeprom]")
 {
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
     eeprom.init();
 
-    uint32_t activeOffset = SectorBase1 + 2;
-    uint32_t alternateOffset = SectorBase2 + 2;
-    auto fromSector = Sector1;
-    auto toSector = Sector2;
-    uint16_t exceptRecordId = 0xFFFF;
+    uint32_t activeOffset = PageBase1 + 2;
+    uint32_t alternateOffset = PageBase2 + 2;
+    auto fromPage = Page1;
+    auto toPage = Page2;
+    uint16_t exceptRecordIdStart = 0xFFFF;
+    uint16_t exceptRecordIdEnd = 0xFFFF;
+
+    uint16_t recordId = 100;
 
     SECTION("Single record")
     {
-        uint16_t recordId = 100;
-        uint8_t record = 0xBB;
-        activeOffset = store.writeRecord(activeOffset, recordId, record);
+        eeprom.put(recordId, 0xBB);
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
 
         THEN("The record is copied")
         {
-            store.requireValidRecord(alternateOffset, recordId, record);
+            store.requireValidRecord(alternateOffset, recordId, 0xBB);
         }
     }
 
     SECTION("Multiple copies of a record")
     {
-        uint16_t recordId = 100;
-        uint8_t record = 0xBB;
-        activeOffset = store.writeRecord(activeOffset, recordId, record);
+        eeprom.put(recordId, 0xBB);
+        eeprom.put(recordId, 0xCC);
 
-        uint8_t newRecord = 0xCC;
-        activeOffset = store.writeRecord(activeOffset, recordId, newRecord);
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
-
-        THEN("The latest record is copied")
+        THEN("The last record is copied, followed by empty space")
         {
-            store.requireValidRecord(alternateOffset, recordId, newRecord);
+            store.requireValidRecord(alternateOffset, recordId, 0xCC);
+        }
+    }
+
+    SECTION("Multiple copies of a record followed by an invalid record")
+    {
+        eeprom.put(recordId, 0xBB);
+        eeprom.put(recordId, 0xCC);
+        eeprom.store.discardWritesAfter(1, [&] {
+            eeprom.put(recordId, 0xEE);
+        });
+
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+
+        THEN("The last valid record is copied")
+        {
+            alternateOffset = store.requireValidRecord(alternateOffset, recordId, 0xCC);
+            alternateOffset = store.requireEmptyRecord(alternateOffset);
+        }
+    }
+
+    SECTION("Record with 0xFF value")
+    {
+        eeprom.put(recordId, 0xBB);
+        eeprom.put(recordId, 0xFF);
+
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+
+        THEN("The record is not copied")
+        {
+            alternateOffset = store.requireEmptyRecord(alternateOffset);
         }
     }
 
     SECTION("Multiple records")
     {
         uint16_t recordIds[] = { 30, 10, 40 };
-        uint32_t record = 0xDEADBEEF;
+        uint8_t record = 0xAA;
 
-        activeOffset = store.writeRecord(activeOffset, recordIds[0], record);
-        activeOffset = store.writeRecord(activeOffset, recordIds[1], record);
-        activeOffset = store.writeRecord(activeOffset, recordIds[2], record);
+        for(auto id : recordIds)
+        {
+            eeprom.put(id, record);
+        }
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
 
         THEN("The records are copied from small ids to large ids")
         {
@@ -876,56 +821,80 @@ TEST_CASE("Copy records to sector", "[eeprom]")
         }
     }
 
-    SECTION("Except a specified record")
+    SECTION("Except specified records")
     {
         uint16_t recordIds[] = { 30, 10, 40 };
-        uint32_t record = 0xDEADBEEF;
+        uint8_t record = 0xAA;
 
-        activeOffset = store.writeRecord(activeOffset, recordIds[0], record);
-        activeOffset = store.writeRecord(activeOffset, recordIds[1], record);
-        activeOffset = store.writeRecord(activeOffset, recordIds[2], record);
+        for(auto id : recordIds)
+        {
+            eeprom.put(id, record);
+        }
 
-        exceptRecordId = 10;
+        exceptRecordIdStart = 10;
+        exceptRecordIdEnd = 10;
 
-        eeprom.copyAllRecordsToSector(fromSector, toSector, exceptRecordId);
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
 
-        THEN("The specified record is not copied")
+        THEN("The specified records are not copied")
         {
             alternateOffset = store.requireValidRecord(alternateOffset, recordIds[0], record);
             alternateOffset = store.requireValidRecord(alternateOffset, recordIds[2], record);
+            alternateOffset = store.requireEmptyRecord(alternateOffset);
+        }
+    }
+
+    SECTION("With invalid records")
+    {
+        eeprom.put(recordId, 0xAA);
+        eeprom.store.discardWritesAfter(1, [&] {
+            eeprom.put(200, 0xEE);
+        });
+
+        THEN("Records up to the invalid record are copied")
+        {
+            eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+
+            // The copied record is followed by empty space
+            alternateOffset = store.requireValidRecord(alternateOffset, recordId, 0xAA);
+            alternateOffset = store.requireEmptyRecord(alternateOffset);
         }
     }
 }
 
-TEST_CASE("Swap sectors", "[eeprom]")
+TEST_CASE("Swap pages", "[eeprom]")
 {
     TestEEPROM eeprom;
     StoreManipulator store(eeprom.store);
 
     eeprom.init();
 
-    uint32_t activeOffset = SectorBase1;
-    uint32_t alternateOffset = SectorBase2;
+    uint32_t activeOffset = PageBase1;
+    uint32_t alternateOffset = PageBase2;
 
     // Write some data
-    uint16_t recordId = 100;
-    uint8_t record = 0xBB;
-    eeprom.put(recordId, record);
+    uint16_t recordId = 0;
+    uint8_t data[] = { 1, 2, 3 };
+    eeprom.put(recordId, data, sizeof(data));
 
     // Have a record to write after the swap
-    uint16_t newRecordId = 200;
-    uint8_t newRecord = 0xCC;
+    uint16_t newRecordId = 1;
+    uint8_t newData[] = { 20, 30 };
 
     auto requireSwapCompleted = [&]()
     {
-        store.requireSectorStatus(activeOffset, SECTOR_INACTIVE);
-        store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
-        store.requireValidRecord(alternateOffset + 2, recordId, record);
+        store.requirePageStatus(activeOffset, PAGE_ERASED);
+        store.requirePageStatus(alternateOffset, PAGE_ACTIVE);
+
+        uintptr_t dataOffset = alternateOffset + 2;
+        dataOffset = store.requireValidRecord(dataOffset, 0, 1);
+        dataOffset = store.requireValidRecord(dataOffset, 1, 20);
+        dataOffset = store.requireValidRecord(dataOffset, 2, 30);
     };
 
     auto performSwap = [&]()
     {
-        eeprom.swapSectorsAndWriteRecord(newRecordId, &newRecord, sizeof(newRecord));
+        eeprom.swapPagesAndWrite(newRecordId, newData, sizeof(newData));
     };
 
     SECTION("No interruption")
@@ -935,17 +904,18 @@ TEST_CASE("Swap sectors", "[eeprom]")
         requireSwapCompleted();
     }
 
-    SECTION("Interrupted sector swap 1: during erase")
+    SECTION("Interrupted page swap 1: during erase")
     {
-        store.writeSectorStatus(alternateOffset, SECTOR_INACTIVE);
+        // Garbage status
+        store.writePageStatus(alternateOffset, 999);
         eeprom.store.setWriteCount(0);
 
         performSwap();
 
-        // Verify that the alternate sector is not yet erased
-        store.requireSectorStatus(alternateOffset, SECTOR_INACTIVE);
+        // Verify that the alternate page is not yet erased
+        store.requirePageStatus(alternateOffset, 999);
 
-        THEN("Redoing the sector swap works")
+        THEN("Redoing the page swap works")
         {
             eeprom.store.setWriteCount(INT_MAX);
 
@@ -955,15 +925,15 @@ TEST_CASE("Swap sectors", "[eeprom]")
         }
     }
 
-    SECTION("Interrupted sector swap 2: during copy")
+    SECTION("Interrupted page swap 2: during copy")
     {
         eeprom.store.setWriteCount(2);
-        eeprom.swapSectorsAndWriteRecord(newRecordId, &newRecord, sizeof(newRecord));
+        performSwap();
 
-        // Verify that the alternate sector is still copy
-        store.requireSectorStatus(alternateOffset, SECTOR_COPY);
+        // Verify that the alternate page is still copy
+        store.requirePageStatus(alternateOffset, PAGE_COPY);
 
-        THEN("Redoing the sector swap works")
+        THEN("Redoing the page swap works")
         {
             eeprom.store.setWriteCount(INT_MAX);
 
@@ -973,78 +943,78 @@ TEST_CASE("Swap sectors", "[eeprom]")
         }
     }
 
-    SECTION("Interrupted sector swap 3: before old sector becomes inactive")
+    SECTION("Interrupted page swap 3: before old page gets erased")
     {
-        eeprom.store.setWriteCount(8);
+        eeprom.store.setWriteCount(5);
 
         performSwap();
 
-        // Verify that both sectors are active
-        store.requireSectorStatus(alternateOffset, SECTOR_ACTIVE);
-        store.requireSectorStatus(activeOffset, SECTOR_ACTIVE);
+        // Verify that both pages are active
+        store.requirePageStatus(alternateOffset, PAGE_ACTIVE);
+        store.requirePageStatus(activeOffset, PAGE_ACTIVE);
 
-        THEN("Sector 1 remains the active sector")
+        THEN("Page 1 remains the active page")
         {
             eeprom.store.setWriteCount(INT_MAX);
 
-            REQUIRE(eeprom.getActiveSector() == Sector1);
+            REQUIRE(eeprom.getActivePage() == Page1);
         }
     }
 }
-
-TEST_CASE("Erasable sector", "[eeprom]")
-{
-    TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    store.eraseAll();
-
-    uint32_t activeOffset = SectorBase1;
-    uint32_t alternateOffset = SectorBase2;
-
-    SECTION("One active sector, one erased sector")
-    {
-        store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
-
-        THEN("No sector needs to be erased")
-        {
-            REQUIRE(eeprom.getPendingEraseSector() == NoSector);
-            REQUIRE(eeprom.hasPendingErase() == false);
-        }
-    }
-
-    SECTION("One active sector, one inactive sector")
-    {
-        store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
-        store.writeSectorStatus(alternateOffset, SECTOR_INACTIVE);
-        eeprom.updateActiveSector();
-
-        THEN("The old sector needs to be erased")
-        {
-            REQUIRE(eeprom.getPendingEraseSector() == Sector2);
-            REQUIRE(eeprom.hasPendingErase() == true);
-        }
-
-        THEN("Erasing the old sector clear it")
-        {
-            eeprom.performPendingErase();
-
-            REQUIRE(eeprom.getPendingEraseSector() == NoSector);
-            REQUIRE(eeprom.hasPendingErase() == false);
-        }
-    }
-
-    SECTION("2 active sectors")
-    {
-        store.writeSectorStatus(activeOffset, SECTOR_ACTIVE);
-        store.writeSectorStatus(alternateOffset, SECTOR_ACTIVE);
-        eeprom.updateActiveSector();
-
-        THEN("Sector 2 needs to be erased")
-        {
-            REQUIRE(eeprom.getPendingEraseSector() == Sector2);
-            REQUIRE(eeprom.hasPendingErase() == true);
-        }
-    }
-}
+//
+//TEST_CASE("Erasable page", "[eeprom]")
+//{
+//    TestEEPROM eeprom;
+//    StoreManipulator store(eeprom.store);
+//
+//    store.eraseAll();
+//
+//    uint32_t activeOffset = PageBase1;
+//    uint32_t alternateOffset = PageBase2;
+//
+//    SECTION("One active page, one erased page")
+//    {
+//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+//        eeprom.updateActivePage();
+//
+//        THEN("No page needs to be erased")
+//        {
+//            REQUIRE(eeprom.getPendingErasePage() == NoPage);
+//            REQUIRE(eeprom.hasPendingErase() == false);
+//        }
+//    }
+//
+//    SECTION("One active page, one inactive page")
+//    {
+//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+//        store.writePageStatus(alternateOffset, PAGE_INACTIVE);
+//        eeprom.updateActivePage();
+//
+//        THEN("The old page needs to be erased")
+//        {
+//            REQUIRE(eeprom.getPendingErasePage() == Page2);
+//            REQUIRE(eeprom.hasPendingErase() == true);
+//        }
+//
+//        THEN("Erasing the old page clear it")
+//        {
+//            eeprom.performPendingErase();
+//
+//            REQUIRE(eeprom.getPendingErasePage() == NoPage);
+//            REQUIRE(eeprom.hasPendingErase() == false);
+//        }
+//    }
+//
+//    SECTION("2 active pages")
+//    {
+//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+//        store.writePageStatus(alternateOffset, PAGE_ACTIVE);
+//        eeprom.updateActivePage();
+//
+//        THEN("Page 2 needs to be erased")
+//        {
+//            REQUIRE(eeprom.getPendingErasePage() == Page2);
+//            REQUIRE(eeprom.hasPendingErase() == true);
+//        }
+//    }
+//}

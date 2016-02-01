@@ -20,13 +20,27 @@
  ******************************************************************************
  */
 
-#include <stddef.h>
+#include <cstddef>
 #include <cstring>
+#include <memory>
+
+// version 2 notes
+//
+// - Failure mode of reset during page erase after page swap remains
+// - TODO: cache findEmptyOffset()
+// - TODO: Mark a page as inactive using a page footer or by changing
+// the value of PageHeader::ACTIVE to allow another state PageHeader::INACTIVE
+// - TODO: page swap optimization: don't copy records with 0xFF to a new page
+
+// What does this mean?
+// when unpacking from the combined image, we have the default application image stored
+// in the eeprom region.
+
 
 // FIXME: Remove this comment when implementation is done
-// terminology: use sector, not page or block
+// terminology: use page, not page or block
 //              use offset, not address
-//              use uintptr_t for offset, size_t for sector sizes
+//              use uintptr_t for offset, size_t for page sizes
 //
 // FIXME: Different address space
 
@@ -37,14 +51,14 @@
 //
 // - Present record layout
 // - Present incomplete record write recovery strategy
-// - Present incomplete sector swap recovery strategy
-// - Present pending sector erase
+// - Present incomplete page swap recovery strategy
+// - Present pending page erase
 // - store.read instead of store.dataAt because of misaligned data
 //   (misalignment of records, and use of FLASH_ProgramWord / FLASH_ProgramByte has no impact on the robustness)
 // - cache capacity because it's O(n^2) to calculate (don't do it before each put)
-// - impact of different sector sizes
+// - impact of different page sizes
 // - testing strategy with writing partial records/validating raw EEPROM
-// - Plan for migration: leave old sector alone and start writing on new sector
+// - Plan for migration: leave old page alone and start writing on new page
 // - Expanded API: get, put, clear, remove, countRecords, listRecords (maybe also recordSize), capacity, pending erase
 // - Current Wiring implementation calls HAL_EEPROM_Init on first usage (great!)
 // - Question: expectations/contract of the Wiring EEPROM API (100% backwards compatible with earlier Arduino core releases): iterator, length, record id vs logical address, return type of get/put
@@ -52,296 +66,180 @@
 
 // - TODO: get returns the size of the data read or -1 if not found. Zero in input struct before reading
 
-template <typename Store, uintptr_t SectorBase1, size_t SectorSize1, uintptr_t SectorBase2, size_t SectorSize2>
-class EEPROMEmulation
+template <typename Store, uintptr_t PageBase1, size_t PageSize1, uintptr_t PageBase2, size_t PageSize2>
+class EEPROMEmulationByte
 {
 public:
-    static constexpr size_t SmallestSectorSize = (SectorSize1 < SectorSize2) ? SectorSize1 : SectorSize2;
+    static constexpr size_t SmallestPageSize = (PageSize1 < PageSize2) ? PageSize1 : PageSize2;
 
-    enum class LogicalSector
+    enum class LogicalPage
     {
-        NoSector,
-        Sector1,
-        Sector2
+        NoPage,
+        Page1,
+        Page2
     };
 
     static const uint8_t FLASH_ERASED = 0xFF;
 
-    struct __attribute__((packed)) SectorHeader
+    // Struct used to store the state of a page of emulated EEPROM
+    //
+    // WARNING: Do not change the size of struct or order of elements since
+    // instances of this struct are persisted in the flash memory
+    struct __attribute__((packed)) PageHeader
     {
         static const uint16_t ERASED = 0xFFFF;
-        static const uint16_t COPY = 0x0FFF;
-        static const uint16_t ACTIVE = 0x00FF;
-        static const uint16_t INACTIVE = 0x000F;
-
-        // TODO: use this for migration
-        static const uint16_t LEGACY_ACTIVE = 0x0000;
+        static const uint16_t COPY = 0xEEEE;
+        static const uint16_t ACTIVE = 0x0000;
 
         uint16_t status;
+
+        PageHeader(uint16_t status = ERASED) : status(status)
+        {
+        }
     };
 
-    struct __attribute__((packed)) Header
+    // Struct used to store the value of 1 byte in the emulated EEPROM
+    //
+    // WARNING: Do not change the size of struct or order of elements since
+    // instances of this struct are persisted in the flash memory
+    struct __attribute__((packed)) Record
     {
-        // TODO: does it matter if status is uint8_t or uint16_t? impact
-        // on alignment?
         static const uint8_t EMPTY = 0xFF;
-        static const uint8_t INVALID = 0x7F;
-        static const uint8_t VALID = 0x0F;
-        static const uint8_t REMOVED = 0x07;
+        static const uint8_t INVALID = 0x0F;
+        static const uint8_t VALID = 0x00;
 
-        static const uint16_t EMPTY_LENGTH = 0xFFFF;
+        static const uint16_t EMPTY_ID = 0xFFFF;
 
-        uint8_t status;
-        uint16_t length;
         uint16_t id;
+        uint8_t status;
+        uint8_t data;
+
+        Record(uint16_t status = EMPTY, uint16_t id = EMPTY_ID, uint8_t data = FLASH_ERASED)
+            : id(id), status(status), data(data)
+        {
+        }
     };
+
 
     /* Public API */
 
-    // Initialize the EEPROM sectors
+    // Initialize the EEPROM pages
     // Call at boot
     void init()
     {
-        updateActiveSector();
+        updateActivePage();
 
-        if(getActiveSector() == LogicalSector::NoSector)
+        if(getActivePage() == LogicalPage::NoPage)
         {
             clear();
         }
-
-        // FIXME: remove
-        // If there's a pending erase after a sector swap, do it at boot
-        performPendingErase();
-
-        calculateCapacity();
     }
 
     // Read the latest value of a record
-    // Returns false if the records was not found, true if read
-    bool get(uint16_t id, void *output, size_t outputLength)
+    // Writes 0xFF into data if the value was not programmed
+    void get(uint16_t id, uint8_t &data)
     {
-        uint16_t length;
-        uintptr_t dataOffset;
-        if(findRecord(id, length, dataOffset))
-        {
-            if(length == outputLength)
-            {
-                store.read(dataOffset, output, outputLength);
-                return true;
-            }
-            // TODO
-            // else if length == 1 and sizeof(output) != 1
-            // ==> convert from legacy (1 byte per address) to new format
-        }
-        return false;
+        readRange(id, &data, sizeof(data));
     }
 
-    // Convenience read for a record of known size
-    template <typename T>
-    bool get(uint16_t id, T& output)
+    void get(uint16_t startAddress, uint8_t *data, size_t length)
     {
-        return get(id, &output, sizeof(output));
+        readRange(startAddress, data, length);
     }
 
     // Writes a new value for a record
-    // Performs a sector swap (move all valid records to a new sector)
-    // if the current sector is full
+    // Performs a page swap (move all valid records to a new page)
+    // if the current page is full
     // Returns false if there is not enough capacity to write this
-    // record (even after a sector swap), true if record was written
-    bool put(uint16_t id, const void *input, size_t inputLength)
+    // record (even after a page swap), true if record was written
+    bool put(uint16_t id, uint8_t data)
     {
-        // Don't create a new record if identical to previous record
-        uint16_t previousLength = 0;
-        uintptr_t dataOffset = 0;
-        if(findRecord(id, previousLength, dataOffset))
-        {
-            if(identicalValues(input, inputLength, previousLength, dataOffset))
-            {
-                return true;
-            }
-            size_t previousRecordSize = sizeof(Header) + previousLength;
-            updateCapacity(-previousRecordSize);
-        }
+        writeRange(id, &data, sizeof(data));
 
-        size_t recordSize = sizeof(Header) + inputLength;
-
-        // If the new record wouldn't fit even if the current record
-        // were to be removed from the storage by a page swap
-        if(recordSize > remainingCapacity())
-        {
-            return false;
-        }
-
-        if(!writeRecord(getActiveSector(), id, input, inputLength))
-        {
-            return swapSectorsAndWriteRecord(id, input, inputLength);
-        }
-
-        updateCapacity(recordSize);
+        // TODO: remove return value
         return true;
     }
 
-    // Convenience write for a record of known size
-    template <typename T>
-    bool put(uint16_t id, const T& input)
+    void put(uint16_t startAddress, uint8_t *data, size_t length)
     {
-        return put(id, &input, sizeof(input));
+        writeRange(startAddress, data, length);
     }
 
     // Destroys all the data 💣
     void clear()
     {
-        eraseSector(LogicalSector::Sector1);
-        eraseSector(LogicalSector::Sector2);
-        writeSectorStatus(LogicalSector::Sector1, SectorHeader::ACTIVE);
+        erasePage(LogicalPage::Page1);
+        erasePage(LogicalPage::Page2);
+        writePageStatus(LogicalPage::Page1, PageHeader::ACTIVE);
 
-        updateActiveSector();
-        calculateCapacity();
+        updateActivePage();
     }
 
-    // Mark a record as removed to free up some capacity at next sector swap
-    // Return false if the record was not found, true if it was removed.
-    bool remove(uint16_t id)
+    // The number of bytes that can be stored
+    constexpr size_t capacity()
     {
-        bool removed = false;
-        uint16_t currentLength = 0;
-        forEachRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
-        {
-            if(header.id == id)
-            {
-                Header header = { Header::REMOVED, 0, 0 };
-                store.write(offset, &header, sizeof(header.status));
-                removed = true;
-                currentLength = header.length;
-            }
-        });
-
-        updateCapacity(-currentLength);
-
-        return removed;
+        return (SmallestPageSize - sizeof(PageHeader)) / sizeof(Record);
     }
 
-    // The total space available to write records.
-    //
-    // Note: The amount of data that fits is actually smaller since each
-    // record has a header
-    size_t totalCapacity()
-    {
-        return SmallestSectorSize - sizeof(SectorHeader);
-    }
-
-    // The space currently used by all valid records
-    size_t usedCapacity()
-    {
-        return capacity;
-    }
-
-    // The space left to write new records
-    //
-    // Note: The amount of data that fits is actually smaller since each
-    // record has a header
-    size_t remainingCapacity()
-    {
-        return totalCapacity() - usedCapacity();
-    }
-
-    // How many valid records are currently stored
-    uint16_t countRecords()
-    {
-        uint16_t count = 0;
-        forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
-        {
-            count++;
-        });
-        return count;
-    }
-
-    // Get the ids of the valid records currently stored
-    // Returns the number of ids written to the recordIds array
-    uint16_t listRecords(uint16_t *recordIds, uint16_t maxRecordIds)
-    {
-        uint16_t count = 0;
-        forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
-        {
-            if(count < maxRecordIds)
-            {
-                recordIds[count] = header.id;
-                count++;
-            }
-        });
-        return count;
-    }
-
-    // Since erasing a sector prevents the bus accessing the Flash memory
+    // Since erasing a page prevents the bus accessing the Flash memory
     // thus freezing the application code, provide an API for the user
-    // application to figure out if a sector needs to be erased.
+    // application to figure out if a page needs to be erased.
     // If the user application doesn't call performPendingErase(), then
-    // at the next reboot or next sector swap the sector will be erased anyway
+    // at the next reboot or next page swap the page will be erased anyway
     bool hasPendingErase()
     {
-        return getPendingEraseSector() != LogicalSector::NoSector;
+        return getPendingErasePage() != LogicalPage::NoPage;
     }
 
-    // Erases the old sector after a sector swap, if necessary
+    // Erases the old page after a page swap, if necessary
     void performPendingErase()
     {
         if(hasPendingErase())
         {
-            eraseSector(getPendingEraseSector());
+            erasePage(getPendingErasePage());
         }
     }
 
     /* Implementation */
 
-    uintptr_t getSectorStart(LogicalSector sector)
+    uintptr_t getPageStart(LogicalPage page)
     {
-        switch(sector)
+        switch(page)
         {
-            case LogicalSector::Sector1: return SectorBase1;
-            case LogicalSector::Sector2: return SectorBase2;
+            case LogicalPage::Page1: return PageBase1;
+            case LogicalPage::Page2: return PageBase2;
             default: return 0;
         }
     }
 
-    uintptr_t getSectorEnd(LogicalSector sector)
+    uintptr_t getPageEnd(LogicalPage page)
     {
-        switch(sector)
+        switch(page)
         {
-            case LogicalSector::Sector1: return SectorBase1 + SectorSize1;
-            case LogicalSector::Sector2: return SectorBase2 + SectorSize2;
+            case LogicalPage::Page1: return PageBase1 + PageSize1;
+            case LogicalPage::Page2: return PageBase2 + PageSize2;
             default: return 0;
         }
     }
 
-    uintptr_t getSectorSize(LogicalSector sector)
+    uintptr_t getPageSize(LogicalPage page)
     {
-        switch(sector)
+        switch(page)
         {
-            case LogicalSector::Sector1: return SectorSize1;
-            case LogicalSector::Sector2: return SectorSize2;
+            case LogicalPage::Page1: return PageSize1;
+            case LogicalPage::Page2: return PageSize2;
             default: return 0;
         }
     }
 
-    // Check if the existing value of a record matches the new value
-    bool identicalValues(const void *input, uint16_t inputLength, uint16_t recordLength, uintptr_t dataOffset)
-    {
-        if(inputLength != recordLength)
-        {
-            return false;
-        }
-
-        return std::memcmp(input, store.dataAt(dataOffset), inputLength) == 0;
-    }
-
-    // The offset to the first empty record, or the end of the sector if
+    // The offset to the first empty record, or the end of the page if
     // no records are empty
-    uintptr_t findEmptyOffset(LogicalSector sector)
+    uintptr_t findEmptyOffset(LogicalPage page)
     {
-        uintptr_t freeOffset = getSectorEnd(sector);
-        forEachRecord(sector, [&](uintptr_t offset, const Header &header)
+        uintptr_t freeOffset = getPageEnd(page);
+        forEachRecord(page, [&](uintptr_t offset, const Record &record)
         {
-            if(header.status == Header::EMPTY)
+            if(record.status == Record::EMPTY)
             {
                 freeOffset = offset;
             }
@@ -349,154 +247,268 @@ public:
         return freeOffset;
     }
 
-    // Write a record to the first empty space available in a sector
+    // Write a record to the first empty space available in a page
     //
     // Returns false when write was unsuccessful to protect against
     // marginal erase, true on proper write
-    bool writeRecord(LogicalSector sector, uint16_t id, const void *data, uint16_t length)
+    bool writeRecord(LogicalPage page, uint16_t id, uint8_t data, uint16_t status = Record::VALID)
     {
-        uintptr_t freeOffset = findEmptyOffset(sector);
-        size_t spaceRemaining = getSectorEnd(sector) - freeOffset;
-
-        size_t recordSize = sizeof(Header) + length;
+        // FIXME: get rid of findEmptyOffset every time
+        uintptr_t offset = findEmptyOffset(page);
+        size_t spaceRemaining = getPageEnd(page) - offset;
 
         // No more room for record
-        if(spaceRemaining < recordSize)
+        if(spaceRemaining < sizeof(Record))
         {
             return false;
         }
 
-        Header header = {
-            Header::INVALID,
-            length,
-            id
-        };
-
-        // Write header
-        uintptr_t headerOffset = freeOffset;
-        if(store.write(headerOffset, &header, sizeof(header)) < 0)
-        {
-            return false;
-        }
-
-        // Write data
-        uintptr_t dataOffset = headerOffset + sizeof(header);
-        if(store.write(dataOffset, data, length) < 0)
-        {
-            return false;
-        }
-
-        // Write final valid status
-        header.status = Header::VALID;
-        if(store.write(headerOffset, &header, sizeof(header.status)) < 0)
-        {
-            return false;
-        }
-
-        return true;
+        // Write record and return true when write is verified successfully
+        Record record(status, id, data);
+        return (store.write(offset, &record, sizeof(record)) >= 0);
     }
 
-    // Figure out which sector should currently be read from/written to
-    // and which one should be used as the target of the sector swap
-    void updateActiveSector()
+    // Write final valid status on a partially written record
+    //
+    // Returns false when write was unsuccessful to protect against
+    // marginal erase, true on proper write
+    bool writeRecordStatus(uintptr_t offset, uint16_t status)
     {
-        uint16_t status1 = readSectorStatus(LogicalSector::Sector1);
-        uint16_t status2 = readSectorStatus(LogicalSector::Sector2);
+        Record record(status);
+        uintptr_t statusOffset = offset + offsetof(Record, status);
+        return (store.write(statusOffset, &record.status, sizeof(record.status)) >= 0);
+    }
 
-        // Pick the first active sector
-        if(status1 == SectorHeader::ACTIVE)
+
+    // Figure out which page should currently be read from/written to
+    // and which one should be used as the target of the page swap
+    void updateActivePage()
+    {
+        uint16_t status1 = readPageStatus(LogicalPage::Page1);
+        uint16_t status2 = readPageStatus(LogicalPage::Page2);
+
+        // Pick the first active page
+        if(status1 == PageHeader::ACTIVE)
         {
-            activeSector = LogicalSector::Sector1;
-            alternateSector = LogicalSector::Sector2;
+            activePage = LogicalPage::Page1;
+            alternatePage = LogicalPage::Page2;
         }
-        else if(status2 == SectorHeader::ACTIVE)
+        else if(status2 == PageHeader::ACTIVE)
         {
-            activeSector = LogicalSector::Sector2;
-            alternateSector = LogicalSector::Sector1;
+            activePage = LogicalPage::Page2;
+            alternatePage = LogicalPage::Page1;
         }
         else
         {
-            activeSector = LogicalSector::NoSector;
-            alternateSector = LogicalSector::NoSector;
+            activePage = LogicalPage::NoPage;
+            alternatePage = LogicalPage::NoPage;
         }
     }
 
-    // Which sector should currently be read from/written to
-    LogicalSector getActiveSector()
+    // Which page should currently be read from/written to
+    LogicalPage getActivePage()
     {
-        return activeSector;
+        return activePage;
     }
 
-    // Which sector should be used as the target for the next swap
-    LogicalSector getAlternateSector()
+    // Which page should be used as the target for the next swap
+    LogicalPage getAlternatePage()
     {
-        return alternateSector;
+        return alternatePage;
     }
 
-    // Iterate through a sector to find the latest valid record with a
+    // Iterate through a page to extract the latest value of each address
+    void readRange(uint16_t startAddress, uint8_t *data, uint16_t length)
+    {
+        std::memset(data, FLASH_ERASED, length);
+
+        uint16_t endAddress = startAddress + length;
+        forEachValidRecord(getActivePage(), [&](uintptr_t offset, const Record &record)
+        {
+            if(record.id >= startAddress && record.id <= endAddress)
+            {
+                data[record.id - startAddress] = record.data;
+            }
+        });
+    }
+
+    // Write the new value of each byte in the range if it has changed.
+    //
+    // Write new records as invalid in increasing order of address, then
+    // go back and write records as valid in decreasing order of
+    // address. This ensures data consistency if writeRange is
+    // interrupted by a reset.
+    void writeRange(uint16_t startAddress, uint8_t *data, uint16_t length)
+    {
+        // don't write anything if address is out of range
+        if(startAddress + length >= capacity())
+        {
+            return;
+        }
+
+        // Read existing values for range
+        std::unique_ptr<uint8_t[]> existingData(new uint8_t[length]);
+        // don't write anything if memory is full
+        if(!existingData)
+        {
+            return;
+        }
+        readRange(startAddress, existingData.get(), length);
+
+        // Make sure there are no previous invalid records before
+        // starting to write
+        bool success = !hasInvalidRecords(getActivePage());
+
+        // Write all changed values as invalid records
+        for(uint16_t i = 0; i < length && success; i++)
+        {
+            if(existingData[i] != data[i])
+            {
+                uint16_t address = startAddress + i;
+                success = success && writeRecord(getActivePage(), address, data[i], Record::INVALID);
+            }
+        }
+
+        // If all writes succeeded, mark all invalid records active
+        if(success)
+        {
+            forEachInvalidRecord(getActivePage(), [&](uintptr_t offset, const Record &record)
+            {
+                success = success && writeRecordStatus(offset, Record::VALID);
+            });
+        }
+
+        // If any writes failed because the page was full or a marginal
+        // write error occured, do a page swap then write all the
+        // records
+        if(!success)
+        {
+            swapPagesAndWrite(startAddress, data, length);
+        }
+    }
+
+    // Iterate through a page to find the latest valid record with a
     // specified id
     // Returns true if a record is found and puts length and data in the
     // parameters references
-    bool findRecord(uint16_t id, uint16_t &length, uintptr_t &data)
+    bool findRecord(uint16_t id, uint8_t &data)
     {
         bool found = false;
-        forEachRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
+        forEachRecord(getActivePage(), [&](uintptr_t offset, const Record &record)
         {
-            if(header.status == Header::VALID && header.id == id)
+            if(record.status == Record::VALID && record.id == id)
             {
-                length = header.length;
-                data = offset + sizeof(header);
+                data = record.data;
                 found = true;
             }
         });
         return found;
     }
 
-    // Iterate through a sector and yield each record, including valid
+    // Iterate through a page and yield each record, including valid
     // and invalid records, and the empty record at the end (if there is
     // room)
     template <typename Func>
-    void forEachRecord(LogicalSector sector, Func f)
+    void forEachRecord(LogicalPage page, Func f)
     {
-        uintptr_t currentOffset = getSectorStart(sector);
-        uintptr_t lastOffset = getSectorEnd(sector);
+        uintptr_t currentOffset = getPageStart(page);
+        uintptr_t lastOffset = getPageEnd(page);
 
-        // Skip sector header
-        currentOffset += sizeof(SectorHeader);
+        // Skip page header
+        currentOffset += sizeof(PageHeader);
 
         // Walk through record list
         while(currentOffset < lastOffset)
         {
-            Header header;
-            store.read(currentOffset, &header, sizeof(Header));
+            const Record &record = *(const Record *) store.dataAt(currentOffset);
 
             // Yield record
-            f(currentOffset, header);
+            f(currentOffset, record);
 
             // End of data
-            if(header.status == Header::EMPTY)
+            if(record.status == Record::EMPTY)
             {
                 return;
             }
 
-            // Skip over data if the header was properly written
-            if(header.length != Header::EMPTY_LENGTH)
-            {
-                currentOffset += header.length;
-            }
-
-            // Skip over record header
-            currentOffset += sizeof(header);
+            // Skip over record
+            currentOffset += sizeof(record);
         }
     }
 
-    // Iterate through a sector and yield each valid record, in
+    // TODO: document
+    template <typename Func>
+    void forEachInvalidRecord(LogicalPage page, Func f)
+    {
+        uintptr_t currentOffset = findLastInvalidOffset(page);
+        uintptr_t startOffset = getPageStart(page);
+
+        // Walk through record list
+        while(currentOffset > startOffset)
+        {
+            const Record &record = *(const Record *) store.dataAt(currentOffset);
+
+            if(record.status == Record::INVALID)
+            {
+                // Yield record
+                f(currentOffset, record);
+            }
+            else
+            {
+                // End of invalid records
+                return;
+            }
+
+            // Skip backwards over record
+            currentOffset -= sizeof(record);
+        }
+    }
+
+    // TODO: document
+    uintptr_t findLastInvalidOffset(LogicalPage page)
+    {
+        uintptr_t invalidOffset = getPageStart(page);
+        forEachRecord(page, [&](uintptr_t offset, const Record &record)
+        {
+            if(record.status == Record::INVALID)
+            {
+                invalidOffset = offset;
+            }
+        });
+        return invalidOffset;
+    }
+
+    bool hasInvalidRecords(LogicalPage page)
+    {
+        return findLastInvalidOffset(page) != getPageStart(page);
+    }
+
+    // Iterate through a page and yield each valid record,
+    // ignoring any records after the first invalid one
+    template <typename Func>
+    void forEachValidRecord(LogicalPage page, Func f)
+    {
+        bool foundInvalid = false;
+        forEachRecord(page, [&](uintptr_t offset, const Record &record)
+        {
+            if(!foundInvalid && record.status == Record::VALID)
+            {
+                f(offset, record);
+            }
+            else
+            {
+                foundInvalid = true;
+            }
+        });
+    }
+
+    // Iterate through a page and yield each valid record, in
     // increasing order of id
     template <typename Func>
-    void forEachValidRecord(LogicalSector sector, Func f)
+    void forEachSortedValidRecord(LogicalPage page, Func f)
     {
         uint16_t currentId;
-        uintptr_t currentOffset;
+        uint8_t currentData;
         int32_t previousId = -1;
         bool nextRecordFound;
 
@@ -504,36 +516,31 @@ public:
         {
             nextRecordFound = false;
             currentId = UINT16_MAX;
-            forEachRecord(sector, [&](uintptr_t offset, const Header &header)
+            forEachValidRecord(page, [&](uintptr_t offset, const Record &record)
             {
-                if(header.status == Header::VALID &&
-                        header.id <= currentId &&
-                        (int32_t)header.id > previousId)
+                if( record.id <= currentId && (int32_t)record.id > previousId)
                 {
-                    currentId = header.id;
-                    currentOffset = offset;
+                    currentId = record.id;
+                    currentData = record.data;
                     nextRecordFound = true;
                 }
             });
 
             if(nextRecordFound)
             {
-                Header header;
-                store.read(currentOffset, &header, sizeof(Header));
-
                 // Yield record
-                f(currentOffset, header);
+                f(currentId, currentData);
                 previousId = currentId;
             }
         } while(nextRecordFound);
     }
-   
-    // Verify that the entire sector is erased to protect against resets
-    // during sector erase
-    bool verifySector(LogicalSector sector)
+
+    // Verify that the entire page is erased to protect against resets
+    // during page erase
+    bool verifyPage(LogicalPage page)
     {
-        const uint8_t *begin = store.dataAt(getSectorStart(sector));
-        const uint8_t *end = store.dataAt(getSectorEnd(sector));
+        const uint8_t *begin = store.dataAt(getPageStart(page));
+        const uint8_t *end = store.dataAt(getPageEnd(page));
         while(begin < end)
         {
             if(*begin++ != FLASH_ERASED)
@@ -545,135 +552,117 @@ public:
         return true;
     }
 
-    // Reset entire sector to 0xFF
-    void eraseSector(LogicalSector sector)
+    // Reset entire page to 0xFF
+    void erasePage(LogicalPage page)
     {
-        store.eraseSector(getSectorStart(sector));
+        store.eraseSector(getPageStart(page));
     }
 
-    // Get the current status of a sector (empty, active, being copied, ...)
-    uint16_t readSectorStatus(LogicalSector sector)
+    // Get the current status of a page (empty, active, being copied, ...)
+    uint16_t readPageStatus(LogicalPage page)
     {
-        SectorHeader header;
-        store.read(getSectorStart(sector), &header, sizeof(header));
+        PageHeader header;
+        store.read(getPageStart(page), &header, sizeof(header));
         return header.status;
     }
 
-    // Update the status of a sector
-    bool writeSectorStatus(LogicalSector sector, uint16_t status)
+    // Update the status of a page
+    bool writePageStatus(LogicalPage page, uint16_t status)
     {
-        SectorHeader header = { status };
-        return store.write(getSectorStart(sector), &header, sizeof(header)) == 0;
+        PageHeader header = { status };
+        return store.write(getPageStart(page), &header, sizeof(header)) == 0;
     }
 
-    // Write all valid records from the active sector to the alternate
-    // sector. Erase the alternate sector if it is not already erased.
-    // Then write the new record to the alternate sector.
-    bool swapSectorsAndWriteRecord(uint16_t id, const void *data, uint16_t length)
+    // Write all valid records from the active page to the alternate
+    // page. Erase the alternate page if it is not already erased.
+    // Then write the new record to the alternate page.
+    // Then erase the old active page
+    bool swapPagesAndWrite(uint16_t id, const uint8_t *data, uint16_t length)
     {
-        LogicalSector sourceSector = getActiveSector();
-        LogicalSector destinationSector = getAlternateSector();
+        LogicalPage sourcePage = getActivePage();
+        LogicalPage destinationPage = getAlternatePage();
 
-        // loop protects against marginal erase: if a sector was kind of
+        // loop protects against marginal erase: if a page was kind of
         // erased and read back as all 0xFF but when values are written
         // some bits written as 1 actually become 0
         for(int tries = 0; tries < 2; tries++)
         {
-            if(!verifySector(destinationSector) || tries > 0)
+            bool success = true;
+            if(!verifyPage(destinationPage) || tries > 0)
             {
-                eraseSector(destinationSector);
+                erasePage(destinationPage);
             }
 
-            if(!writeSectorStatus(destinationSector, SectorHeader::COPY))
-            {
-                continue;
-            }
+            // Write alternate page as destination for copy
+            success = success && writePageStatus(destinationPage, PageHeader::COPY);
 
-            if(!copyAllRecordsToSector(sourceSector, destinationSector, id))
-            {
-                continue;
-            }
+            // Copy records from source to destination
+            success = success && copyAllRecordsToPageExcept(sourcePage, destinationPage, id, id + length);
 
             // FIXME: simulate a marginal write error. This would be
             // hard to do automatically from the unit test...
             //if(tries == 0)
             //{
             //    uint32_t garbage = 0xDEADBEEF;
-            //    store.write(getSectorStart(destinationSector) + 10, &garbage, sizeof(garbage));
-            //    continue;
+            //    store.write(getPageStart(destinationPage) + 10, &garbage, sizeof(garbage));
+            //    success = false;
             //}
 
-            if(!writeRecord(destinationSector, id, data, length))
+            // Write new records to destination directly
+            for(uint16_t i = 0; i < length && success; i++)
             {
-                continue;
+                // Don't bother writing records that are 0xFF
+                if(data[i] != FLASH_ERASED)
+                {
+                    success = success && writeRecord(destinationPage, id + i, data[i]);
+                }
             }
 
-            if(!writeSectorStatus(destinationSector, SectorHeader::ACTIVE))
+            success = success && writePageStatus(destinationPage, PageHeader::ACTIVE);
+
+            if(success)
             {
-                continue;
+                erasePage(sourcePage);
+                updateActivePage();
+                return true;
             }
-
-            if(!writeSectorStatus(sourceSector, SectorHeader::INACTIVE))
-            {
-                continue;
-            }
-
-            // Success!
-
-            updateActiveSector();
-            calculateCapacity();
-            return true;
         }
 
         return false;
     }
 
-    // Perform the actual copy of records during sector swap
-    bool copyAllRecordsToSector(LogicalSector sourceSector, LogicalSector destinationSector, uint16_t exceptRecordId)
+    // Perform the actual copy of records during page swap
+    bool copyAllRecordsToPageExcept(LogicalPage sourcePage,
+            LogicalPage destinationPage,
+            uint16_t exceptRecordIdStart,
+            uint16_t exceptRecordIdEnd)
     {
         bool success = true;
-        forEachValidRecord(sourceSector, [&](uintptr_t offset, const Header &header)
+        forEachSortedValidRecord(sourcePage, [&](uint16_t id, uint8_t data)
         {
-            if(header.id != exceptRecordId)
+            if(id < exceptRecordIdStart || id > exceptRecordIdEnd)
             {
-                const void *currentData = store.dataAt(offset + sizeof(header));
-                success = success && writeRecord(destinationSector, header.id, currentData, header.length);
+                // Don't bother writing records that are 0xFF
+                if(data != FLASH_ERASED)
+                {
+                    success = success && writeRecord(destinationPage, id, data);
+                }
             }
         });
 
         return success;
     }
 
-    // The space currently used by all valid records
-    // This is an expensive operation if there are a lot of records so
-    // cache the result in a member variable
-    void calculateCapacity()
+    // Which page needs to be erased after a page swap.
+    LogicalPage getPendingErasePage()
     {
-        size_t partialCapacity = 0;
-        forEachValidRecord(getActiveSector(), [&](uintptr_t offset, const Header &header)
+        if(readPageStatus(getAlternatePage()) != PageHeader::ERASED)
         {
-            partialCapacity += sizeof(Header) + header.length;
-        });
-
-        capacity = partialCapacity;
-    }
-
-    // Update capacity after a put or remove
-    void updateCapacity(int32_t capacityChange)
-    {
-        capacity += capacityChange;
-    }
-
-    // Which sector needs to be erased after a sector swap.
-    LogicalSector getPendingEraseSector()
-    {
-        if(readSectorStatus(getAlternateSector()) != SectorHeader::ERASED)
-        {
-            return getAlternateSector();
+            return getAlternatePage();
         }
         else
         {
-            return LogicalSector::NoSector;
+            return LogicalPage::NoPage;
         }
     }
 
@@ -681,7 +670,6 @@ public:
     Store store;
 
 protected:
-    LogicalSector activeSector;
-    LogicalSector alternateSector;
-    size_t capacity;
+    LogicalPage activePage;
+    LogicalPage alternatePage;
 };
