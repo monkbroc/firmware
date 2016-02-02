@@ -28,6 +28,8 @@ auto Page2 = TestEEPROM::LogicalPage::Page2;
 auto PAGE_ERASED = TestEEPROM::PageHeader::ERASED;
 auto PAGE_COPY = TestEEPROM::PageHeader::COPY;
 auto PAGE_ACTIVE = TestEEPROM::PageHeader::ACTIVE;
+auto PAGE_INACTIVE = TestEEPROM::PageHeader::INACTIVE;
+auto PAGE_LEGACY_ACTIVE = TestEEPROM::PageHeader::LEGACY_ACTIVE;
 
 // Decorator class for RAMFlashStorage to pre-write EEPROM records or
 // validate written records
@@ -725,6 +727,25 @@ TEST_CASE("Active page", "[eeprom]")
             REQUIRE(eeprom.getActivePage() == Page1);
         }
     }
+
+    SECTION("Migration from old page status")
+    {
+        SECTION("Page 1 legacy active, page 2 erased")
+        {
+            store.writePageStatus(PageBase1, PAGE_LEGACY_ACTIVE);
+            eeprom.updateActivePage();
+
+            REQUIRE(eeprom.getActivePage() == Page1);
+        }
+
+        SECTION("Page 1 erase, page 2 legacy active")
+        {
+            store.writePageStatus(PageBase2, PAGE_LEGACY_ACTIVE);
+            eeprom.updateActivePage();
+
+            REQUIRE(eeprom.getActivePage() == Page2);
+        }
+    }
 }
 
 TEST_CASE("Alternate page", "[eeprom]")
@@ -910,7 +931,7 @@ TEST_CASE("Swap pages", "[eeprom]")
 
     auto requireSwapCompleted = [&]()
     {
-        store.requirePageStatus(activeOffset, PAGE_ERASED);
+        store.requirePageStatus(activeOffset, PAGE_INACTIVE);
         store.requirePageStatus(alternateOffset, PAGE_ACTIVE);
 
         uintptr_t dataOffset = alternateOffset + 2;
@@ -970,7 +991,7 @@ TEST_CASE("Swap pages", "[eeprom]")
         }
     }
 
-    SECTION("Interrupted page swap 3: before old page gets erased")
+    SECTION("Interrupted page swap 3: before old page becomes inactive")
     {
         eeprom.store.setWriteCount(5);
 
@@ -989,59 +1010,59 @@ TEST_CASE("Swap pages", "[eeprom]")
     }
 }
 
-//TEST_CASE("Erasable page", "[eeprom]")
-//{
-//    TestEEPROM eeprom;
-//    StoreManipulator store(eeprom.store);
-//
-//    store.eraseAll();
-//
-//    uint32_t activeOffset = PageBase1;
-//    uint32_t alternateOffset = PageBase2;
-//
-//    SECTION("One active page, one erased page")
-//    {
-//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
-//        eeprom.updateActivePage();
-//
-//        THEN("No page needs to be erased")
-//        {
-//            REQUIRE(eeprom.getPendingErasePage() == NoPage);
-//            REQUIRE(eeprom.hasPendingErase() == false);
-//        }
-//    }
-//
-//    SECTION("One active page, one inactive page")
-//    {
-//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
-//        store.writePageStatus(alternateOffset, PAGE_INACTIVE);
-//        eeprom.updateActivePage();
-//
-//        THEN("The old page needs to be erased")
-//        {
-//            REQUIRE(eeprom.getPendingErasePage() == Page2);
-//            REQUIRE(eeprom.hasPendingErase() == true);
-//        }
-//
-//        THEN("Erasing the old page clear it")
-//        {
-//            eeprom.performPendingErase();
-//
-//            REQUIRE(eeprom.getPendingErasePage() == NoPage);
-//            REQUIRE(eeprom.hasPendingErase() == false);
-//        }
-//    }
-//
-//    SECTION("2 active pages")
-//    {
-//        store.writePageStatus(activeOffset, PAGE_ACTIVE);
-//        store.writePageStatus(alternateOffset, PAGE_ACTIVE);
-//        eeprom.updateActivePage();
-//
-//        THEN("Page 2 needs to be erased")
-//        {
-//            REQUIRE(eeprom.getPendingErasePage() == Page2);
-//            REQUIRE(eeprom.hasPendingErase() == true);
-//        }
-//    }
-//}
+TEST_CASE("Erasable page", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    store.eraseAll();
+
+    uint32_t activeOffset = PageBase1;
+    uint32_t alternateOffset = PageBase2;
+
+    SECTION("One active page, one erased page")
+    {
+        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+        eeprom.updateActivePage();
+
+        THEN("No page needs to be erased")
+        {
+            REQUIRE(eeprom.getPendingErasePage() == NoPage);
+            REQUIRE(eeprom.hasPendingErase() == false);
+        }
+    }
+
+    SECTION("One active page, one inactive page")
+    {
+        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+        store.writePageStatus(alternateOffset, PAGE_INACTIVE);
+        eeprom.updateActivePage();
+
+        THEN("The old page needs to be erased")
+        {
+            REQUIRE(eeprom.getPendingErasePage() == Page2);
+            REQUIRE(eeprom.hasPendingErase() == true);
+        }
+
+        THEN("Erasing the old page clear it")
+        {
+            eeprom.performPendingErase();
+
+            REQUIRE(eeprom.getPendingErasePage() == NoPage);
+            REQUIRE(eeprom.hasPendingErase() == false);
+        }
+    }
+
+    SECTION("2 active pages")
+    {
+        store.writePageStatus(activeOffset, PAGE_ACTIVE);
+        store.writePageStatus(alternateOffset, PAGE_ACTIVE);
+        eeprom.updateActivePage();
+
+        THEN("Page 2 needs to be erased")
+        {
+            REQUIRE(eeprom.getPendingErasePage() == Page2);
+            REQUIRE(eeprom.hasPendingErase() == true);
+        }
+    }
+}

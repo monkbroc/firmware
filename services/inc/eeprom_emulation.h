@@ -20,50 +20,79 @@
  ******************************************************************************
  */
 
-#include <cstddef>
 #include <cstring>
-#include <memory>
 
-// version 2 notes
-//
-// - Failure mode of reset during page erase after page swap remains
-// - TODO: cache findEmptyAddress()
-// - TODO: Mark a page as inactive using a page footer or by changing
-// the value of PageHeader::ACTIVE to allow another state PageHeader::INACTIVE
+/* EEPROM Emulation using Flash memory
+ *
+ * EEPROM provides reads and writes for single bytes, with a default
+ * value of 0xFF for unprogrammed bytes.
+ *
+ * Two pages (sectors) of Flash memory with potentially different sizes
+ * are used to store records each containing the value of 1 byte of
+ * emulated EEPROM.
+ *
+ * Each record contain an offset (EEPROM virtual address), a data byte
+ * and a status byte (valid, invalid, erased).
+ *
+ * The maximum number of bytes that can be written is the smallest page
+ * size divided by the record size.
+ *
+ * Since erased Flash starts at 0xFF and bits can only be written as 0,
+ * writing a new value of an EEPROM byte involves appending a new record
+ * to the list of current records in the active page.
+ *
+ * Reading involves going through the list of valid records in the
+ * active page looking for the last record with a specified offset.
+ *
+ * When writing a new value and there is no more room in the current
+ * page to append new records, a page swap occurs as follows:
+ * - The alternate page is erased if necessary
+ * - Records for all values except the  ones being written are copied to
+ *   the alternate page
+ * - Records for the changed records are written to the alternate page.
+ * - The alternate page is marked active and becomes the new active page
+ * - The old active page is marked inactive
+ *
+ * Any of these steps can be interrupted by a reset and the data will
+ * remain consistent because the old page will be used until the very
+ * last step (old active page is marked inactive).
+ *
+ * In order to make application programming easier, it is possible to
+ * write multiple bytes in an atomic fashion: either all bytes written
+ * will be read back or none will be read back, even in the presence of
+ * power failure/controller reset.
+ *
+ * Atomic writes are implemented as follows:
+ * - If any invalid records exist, do a page swap (which is atomic)
+ * - Write records with an invalid status for all changed bytes
+ * - Going backwards from the end, write a valid status for all invalid records
+ * - If any of the writes failed, do a page swap
+ *
+ * It is possible for a write to fail verification (reading back the
+ * value). This is because of previous marginal writes or marginal
+ * erases (reset during writing or erase that leaves Flash cells reading
+ * back as 1 but with a true state between 0 and 1).  To protect against
+ * this, if a write doesn't read back correctly, a page swap will be
+ * done.
+ *
+ * On the STM32 microcontroller, the Flash memory cannot be read while
+ * being programmed which means the application is frozen while writing
+ * or erasing the Flash (no interrupts are serviced). Flash writes are
+ * pretty fast, but erases take 200ms or more (depending on the sector
+ * size). To avoid intermittent pauses in the user application due to
+ * page erases during the page swap, the hasPendingErase() and
+ * performPendingErase() APIs exist to allow the user application to
+ * schedule when an old page can be erased. If the user application does
+ * not call performPendingErase() before the next page swap, the
+ * alternate page will be erased just before the page swap.
+ *
+ */
 
 // What does this mean?
 // when unpacking from the combined image, we have the default application image stored
 // in the eeprom region.
 
-
-// FIXME: Remove this comment when implementation is done
-// terminology: use page, not page or block
-//              use offset, not address
-//              use uintptr_t for offset, size_t for page sizes
-//
-// FIXME: Different address space
-
-// For discussion
-// - Flash programming failure mode: marginal write errors (reset while
-// erasing or writing, reads as 1 but true state is between 0 and 1) ->
-// reprogram with same value works, but different value may fail.
-//
-// - Present record layout
-// - Present incomplete record write recovery strategy
-// - Present incomplete page swap recovery strategy
-// - Present pending page erase
-// - store.read instead of store.dataAt because of misaligned data
-//   (misalignment of records, and use of FLASH_ProgramWord / FLASH_ProgramByte has no impact on the robustness)
-// - cache capacity because it's O(n^2) to calculate (don't do it before each put)
-// - impact of different page sizes
-// - testing strategy with writing partial records/validating raw EEPROM
-// - Plan for migration: leave old page alone and start writing on new page
-// - Expanded API: get, put, clear, remove, countRecords, listRecords (maybe also recordSize), capacity, pending erase
-// - Current Wiring implementation calls HAL_EEPROM_Init on first usage (great!)
-// - Question: expectations/contract of the Wiring EEPROM API (100% backwards compatible with earlier Arduino core releases): iterator, length, record id vs logical address, return type of get/put
-// - TODO: migration, on-device integration tests, dynalib, Wiring API, user documentation, simple endurance benchmarks
-
-// - TODO: get returns the size of the data read or -1 if not found. Zero in input struct before reading
+// - TODO: on-device integration tests, dynalib, Wiring API, user documentation, simple endurance benchmarks
 
 template <typename Store, uintptr_t PageBase1, size_t PageSize1, uintptr_t PageBase2, size_t PageSize2>
 class EEPROMEmulation
@@ -80,15 +109,20 @@ public:
 
     static const uint8_t FLASH_ERASED = 0xFF;
 
-    // Struct used to store the state of a page of emulated EEPROM
+    // Stores the status of a page of emulated EEPROM
     //
     // WARNING: Do not change the size of struct or order of elements since
     // instances of this struct are persisted in the flash memory
     struct __attribute__((packed)) PageHeader
     {
         static const uint16_t ERASED = 0xFFFF;
-        static const uint16_t COPY = 0xEEEE;
-        static const uint16_t ACTIVE = 0x0000;
+        static const uint16_t COPY = 0x0FFF;
+        static const uint16_t ACTIVE = 0x00FF;
+        static const uint16_t INACTIVE = 0x000F;
+
+        // The previous implementation used 0 as an active status, but
+        // we need inactive to be writable after active
+        static const uint16_t LEGACY_ACTIVE = 0x0000;
 
         uint16_t status;
 
@@ -97,7 +131,7 @@ public:
         }
     };
 
-    // Struct used to store the value of 1 byte in the emulated EEPROM
+    // A record stores the value of 1 byte in the emulated EEPROM
     //
     // WARNING: Do not change the size of struct or order of elements since
     // instances of this struct are persisted in the flash memory
@@ -118,7 +152,6 @@ public:
         {
         }
     };
-
 
     /* Public API */
 
@@ -141,7 +174,7 @@ public:
         readRange(offset, &data, sizeof(data));
     }
 
-    // Reads the latest value of a block of EEPROM
+    // Reads the latest valid values of a block of EEPROM
     // Fills data with 0xFF if values were not programmed
     void get(uint16_t offset, uint8_t *data, size_t length)
     {
@@ -157,7 +190,7 @@ public:
     }
 
     // Writes new values for a block of EEPROM
-    // The write of all values will be atomic even if a reset occurs
+    // The write will be atomic (all or nothing) even if a reset occurs
     // during the write
     //
     // Performs a page swap (move all valid records to a new page)
@@ -183,17 +216,15 @@ public:
         return (SmallestPageSize - sizeof(PageHeader)) / sizeof(Record);
     }
 
-    // Since erasing a page prevents the bus accessing the Flash memory
-    // thus freezing the application code, provide an API for the user
-    // application to figure out if a page needs to be erased.
-    // If the user application doesn't call performPendingErase(), then
-    // at the next reboot or next page swap the page will be erased anyway
+    // Check if the old page needs to be erased
     bool hasPendingErase()
     {
         return getPendingErasePage() != LogicalPage::NoPage;
     }
 
     // Erases the old page after a page swap, if necessary
+    // Let the user application call this when convenient since erasing
+    // Flash freezes the application for several 100ms.
     void performPendingErase()
     {
         if(hasPendingErase())
@@ -204,6 +235,7 @@ public:
 
     /* Implementation */
 
+    // Start address of the page
     uintptr_t getPageStart(LogicalPage page)
     {
         switch(page)
@@ -214,6 +246,7 @@ public:
         }
     }
 
+    // End address (1 past the end) of the page
     uintptr_t getPageEnd(LogicalPage page)
     {
         switch(page)
@@ -224,7 +257,8 @@ public:
         }
     }
 
-    uintptr_t getPageSize(LogicalPage page)
+    // Number of bytes in the page
+    size_t getPageSize(LogicalPage page)
     {
         switch(page)
         {
@@ -232,53 +266,6 @@ public:
             case LogicalPage::Page2: return PageSize2;
             default: return 0;
         }
-    }
-
-    // The offset to the first empty record, or the end of the page if
-    // no records are empty
-    uintptr_t findEmptyAddress(LogicalPage page)
-    {
-        uintptr_t emptyAddress = getPageEnd(page);
-        forEachRecord(page, [&](uintptr_t address, const Record &record)
-        {
-            if(record.status == Record::EMPTY)
-            {
-                emptyAddress = address;
-            }
-        });
-        return emptyAddress;
-    }
-
-    // Write a record to the first empty space available in a page
-    //
-    // Returns false when write was unsuccessful to protect against
-    // marginal erase, true on proper write
-    bool writeRecord(LogicalPage page, uint16_t offset, uint8_t data, uint16_t status = Record::VALID)
-    {
-        // FIXME: get rid of findEmptyAddress every time
-        uintptr_t address = findEmptyAddress(page);
-        size_t spaceRemaining = getPageEnd(page) - address;
-
-        // No more room for record
-        if(spaceRemaining < sizeof(Record))
-        {
-            return false;
-        }
-
-        // Write record and return true when write is verified successfully
-        Record record(status, offset, data);
-        return (store.write(address, &record, sizeof(record)) >= 0);
-    }
-
-    // Write final valid status on a partially written record
-    //
-    // Returns false when write was unsuccessful to protect against
-    // marginal erase, true on proper write
-    bool writeRecordStatus(uintptr_t address, uint16_t status)
-    {
-        Record record(status);
-        uintptr_t statusAddress = address + offsetof(Record, status);
-        return (store.write(statusAddress, &record.status, sizeof(record.status)) >= 0);
     }
 
     // Figure out which page should currently be read from/written to
@@ -289,12 +276,12 @@ public:
         uint16_t status2 = readPageStatus(LogicalPage::Page2);
 
         // Pick the first active page
-        if(status1 == PageHeader::ACTIVE)
+        if(status1 == PageHeader::ACTIVE || status1 == PageHeader::LEGACY_ACTIVE)
         {
             activePage = LogicalPage::Page1;
             alternatePage = LogicalPage::Page2;
         }
-        else if(status2 == PageHeader::ACTIVE)
+        else if(status2 == PageHeader::ACTIVE || status2 == PageHeader::LEGACY_ACTIVE)
         {
             activePage = LogicalPage::Page2;
             alternatePage = LogicalPage::Page1;
@@ -318,6 +305,20 @@ public:
         return alternatePage;
     }
 
+    // Get the current status of a page (empty, active, being copied, ...)
+    uint16_t readPageStatus(LogicalPage page)
+    {
+        PageHeader *header = (PageHeader *) store.dataAt(getPageStart(page));
+        return header->status;
+    }
+
+    // Update the status of a page
+    bool writePageStatus(LogicalPage page, uint16_t status)
+    {
+        PageHeader header = { status };
+        return store.write(getPageStart(page), &header, sizeof(header)) == 0;
+    }
+
     // Iterate through a page to extract the latest value of each address
     void readRange(uint16_t startOffset, uint8_t *data, uint16_t length)
     {
@@ -333,15 +334,15 @@ public:
         });
     }
 
-    // Write the new value of each byte in the range if it has changed.
+    // Write each byte in the range if its value has changed.
     //
-    // Write new records as invalid in increasing order of address, then
+    // Write new records as invalid in increasing order of offset, then
     // go back and write records as valid in decreasing order of
-    // address. This ensures data consistency if writeRange is
+    // offset. This ensures data consistency if writeRange is
     // interrupted by a reset.
     void writeRange(uint16_t startOffset, uint8_t *data, uint16_t length)
     {
-        // don't write anything if address is out of range
+        // don't write anything if offset is out of range
         if(startOffset + length >= capacity())
         {
             return;
@@ -388,6 +389,58 @@ public:
         }
     }
 
+    // The address to the first empty record, or the end of the page if
+    // no records are empty
+    uintptr_t findEmptyAddress(LogicalPage page)
+    {
+        uintptr_t emptyAddress = getPageEnd(page);
+        forEachRecord(page, [&](uintptr_t address, const Record &record)
+        {
+            if(record.status == Record::EMPTY)
+            {
+                emptyAddress = address;
+            }
+        });
+        return emptyAddress;
+    }
+
+    // Checks if there are any invalid records in a page
+    bool hasInvalidRecords(LogicalPage page)
+    {
+        return findLastInvalidAddress(page) != getPageStart(page);
+    }
+
+    // Write a record to the first empty space available in a page
+    //
+    // Returns false when write was unsuccessful to protect against
+    // marginal erase, true on proper write
+    bool writeRecord(LogicalPage page, uint16_t offset, uint8_t data, uint16_t status = Record::VALID)
+    {
+        uintptr_t address = findEmptyAddress(page);
+        size_t spaceRemaining = getPageEnd(page) - address;
+
+        // No more room for record
+        if(spaceRemaining < sizeof(Record))
+        {
+            return false;
+        }
+
+        // Write record and return true when write is verified successfully
+        Record record(status, offset, data);
+        return (store.write(address, &record, sizeof(record)) >= 0);
+    }
+
+    // Write final valid status on a partially written record
+    //
+    // Returns false when write was unsuccessful to protect against
+    // marginal erase, true on proper write
+    bool writeRecordStatus(uintptr_t address, uint16_t status)
+    {
+        Record record(status);
+        uintptr_t statusAddress = address + offsetof(Record, status);
+        return (store.write(statusAddress, &record.status, sizeof(record.status)) >= 0);
+    }
+
     // Iterate through a page and yield each record, including valid
     // and invalid records, and the empty record at the end (if there is
     // room)
@@ -419,7 +472,9 @@ public:
         }
     }
 
-    // TODO: document
+    // Iterate through a page and yield each invalid record, starting
+    // with the last invalid record going backwards towards the first
+    // invalid record
     template <typename Func>
     void forEachInvalidRecord(LogicalPage page, Func f)
     {
@@ -447,7 +502,8 @@ public:
         }
     }
 
-    // TODO: document
+    // The address to the last invalid record, or the beginning of the
+    // page if no records are invalid
     uintptr_t findLastInvalidAddress(LogicalPage page)
     {
         uintptr_t lastInvalidAddress = getPageStart(page);
@@ -459,11 +515,6 @@ public:
             }
         });
         return lastInvalidAddress;
-    }
-
-    bool hasInvalidRecords(LogicalPage page)
-    {
-        return findLastInvalidAddress(page) != getPageStart(page);
     }
 
     // Iterate through a page and yield each valid record,
@@ -490,8 +541,8 @@ public:
     template <typename Func>
     void forEachSortedValidRecord(LogicalPage page, Func f)
     {
+        uintptr_t currentAddress;
         uint16_t currentOffset;
-        uint8_t currentData;
         int32_t previousOffset = -1;
         bool nextRecordFound;
 
@@ -503,16 +554,18 @@ public:
             {
                 if(record.offset <= currentOffset && (int32_t)record.offset > previousOffset)
                 {
+                    currentAddress = address;
                     currentOffset = record.offset;
-                    currentData = record.data;
                     nextRecordFound = true;
                 }
             });
 
             if(nextRecordFound)
             {
+                const Record &record = *(const Record *) store.dataAt(currentAddress);
+
                 // Yield record
-                f(currentOffset, currentData);
+                f(currentAddress, record);
                 previousOffset = currentOffset;
             }
         } while(nextRecordFound);
@@ -541,21 +594,6 @@ public:
         store.eraseSector(getPageStart(page));
     }
 
-    // Get the current status of a page (empty, active, being copied, ...)
-    uint16_t readPageStatus(LogicalPage page)
-    {
-        PageHeader header;
-        store.read(getPageStart(page), &header, sizeof(header));
-        return header.status;
-    }
-
-    // Update the status of a page
-    bool writePageStatus(LogicalPage page, uint16_t status)
-    {
-        PageHeader header = { status };
-        return store.write(getPageStart(page), &header, sizeof(header)) == 0;
-    }
-
     // Write all valid records from the active page to the alternate
     // page. Erase the alternate page if it is not already erased.
     // Then write the new record to the alternate page.
@@ -582,7 +620,7 @@ public:
             // Copy records from source to destination
             success = success && copyAllRecordsToPageExcept(sourcePage, destinationPage, startOffset, startOffset + length);
 
-            // FIXME: simulate a marginal write error. This would be
+            // Uncomment to simulate a marginal write error. This would be
             // hard to do automatically from the unit test...
             //if(tries == 0)
             //{
@@ -603,10 +641,10 @@ public:
             }
 
             success = success && writePageStatus(destinationPage, PageHeader::ACTIVE);
+            success = success && writePageStatus(sourcePage, PageHeader::INACTIVE);
 
             if(success)
             {
-                erasePage(sourcePage);
                 updateActivePage();
                 return true;
             }
@@ -622,14 +660,14 @@ public:
             uint16_t exceptOffsetEnd)
     {
         bool success = true;
-        forEachSortedValidRecord(sourcePage, [&](uint16_t offset, uint8_t data)
+        forEachSortedValidRecord(sourcePage, [&](uintptr_t address, const Record &record)
         {
-            if(offset < exceptOffsetStart || offset > exceptOffsetEnd)
+            if(record.offset < exceptOffsetStart || record.offset > exceptOffsetEnd)
             {
                 // Don't bother writing records that are 0xFF
-                if(data != FLASH_ERASED)
+                if(record.data != FLASH_ERASED)
                 {
-                    success = success && writeRecord(destinationPage, offset, data);
+                    success = success && writeRecord(destinationPage, record.offset, record.data);
                 }
             }
         });
