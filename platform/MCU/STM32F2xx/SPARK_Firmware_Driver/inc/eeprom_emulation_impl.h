@@ -38,23 +38,46 @@ void HAL_EEPROM_Init(void)
   flashEEPROM.init();
 }
 
-uint8_t HAL_EEPROM_Read(uint32_t address)
+uint8_t HAL_EEPROM_Read(uint32_t index)
 {
   uint8_t value = 0xFF;
-  flashEEPROM.get(address, value);
+  flashEEPROM.get(index, value);
   return value;
 }
 
-void HAL_EEPROM_Write(uint32_t address, uint8_t data)
+void HAL_EEPROM_Write(uint32_t index, uint8_t data)
 {
-  flashEEPROM.put(address, data);
+  flashEEPROM.put(index, data);
 }
 
 size_t HAL_EEPROM_Length()
 {
-  return flashEEPROM.totalCapacity();
+  return flashEEPROM.capacity();
 }
 
-// TODO add additional EEPROM APIs
+void HAL_EEPROM_Get(uint32_t index, void *data, size_t length)
+{
+    flashEEPROM.get(index, data, length);
+}
+
+void HAL_EEPROM_Put(uint32_t index, const void *data, size_t length)
+{
+    flashEEPROM.put(index, data, length);
+}
+
+void HAL_EEPROM_Clear()
+{
+    flashEEPROM.clear();
+}
+
+bool HAL_EEPROM_Has_Pending_Erase()
+{
+    return flashEEPROM.hasPendingErase();
+}
+
+void HAL_EEPROM_Perform_Pending_Erase()
+{
+    flashEEPROM.performPendingErase();
+}
 
 }
