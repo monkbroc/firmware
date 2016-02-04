@@ -40,6 +40,7 @@ class RAMFlashStorage
 {
     uint8_t memory[Sectors*SectorSize];
     int write_count;
+    int erase_count;
 
 public:
     enum Errors
@@ -54,6 +55,7 @@ public:
             memory[i] = rand();
         }
         write_count = INT_MAX;
+        erase_count = 0;
     }
 
     inline bool isValidRange(unsigned address, unsigned size)
@@ -77,6 +79,7 @@ public:
         {
             memory[start++] = 0xFF;
         }
+        erase_count++;
         return 0;
     }
 
@@ -123,6 +126,16 @@ public:
     void setWriteCount(int count)
     {
         write_count = count;
+    }
+
+    int getEraseCount()
+    {
+        return erase_count;
+    }
+
+    void resetEraseCount()
+    {
+        erase_count = 0;
     }
 
     template <typename Func>

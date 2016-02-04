@@ -93,7 +93,7 @@
 // when unpacking from the combined image, we have the default application image stored
 // in the eeprom region.
 
-// - TODO: on-device integration tests, dynalib, Wiring API, user documentation, simple endurance benchmarks
+// - TODO: on-device integration tests, dynalib, Wiring API, user documentation, simple performance benchmarks
 
 template <typename Store, uintptr_t PageBase1, size_t PageSize1, uintptr_t PageBase2, size_t PageSize2>
 class EEPROMEmulation
@@ -277,12 +277,23 @@ public:
         uint16_t status2 = readPageStatus(LogicalPage::Page2);
 
         // Pick the first active page
-        if(status1 == PageHeader::ACTIVE || status1 == PageHeader::LEGACY_ACTIVE)
+        if(status1 == PageHeader::ACTIVE)
         {
             activePage = LogicalPage::Page1;
             alternatePage = LogicalPage::Page2;
         }
-        else if(status2 == PageHeader::ACTIVE || status2 == PageHeader::LEGACY_ACTIVE)
+        else if(status2 == PageHeader::ACTIVE)
+        {
+            activePage = LogicalPage::Page2;
+            alternatePage = LogicalPage::Page1;
+        }
+        // If no page is active, use a legagy page
+        else if(status1 == PageHeader::LEGACY_ACTIVE)
+        {
+            activePage = LogicalPage::Page1;
+            alternatePage = LogicalPage::Page2;
+        }
+        else if(status2 == PageHeader::LEGACY_ACTIVE)
         {
             activePage = LogicalPage::Page2;
             alternatePage = LogicalPage::Page1;

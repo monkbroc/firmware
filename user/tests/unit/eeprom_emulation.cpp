@@ -2,6 +2,7 @@
 // user/tests/unit$ rerun -x -p "**/*.{cpp,h}" -d .,../../../services "make runner && obj/runner [eeprom]"
 #include "catch.hpp"
 #include <string>
+#include <fstream>
 #include <sstream>
 #include "eeprom_emulation.h"
 #include "flash_storage.h"
@@ -1065,4 +1066,99 @@ TEST_CASE("Erasable page", "[eeprom]")
             REQUIRE(eeprom.hasPendingErase() == true);
         }
     }
+}
+
+TEST_CASE("Flash wear validation", "[eeprom]")
+{
+    struct Point
+    {
+        double x, y;
+    };
+
+    TestEEPROM eeprom;
+    eeprom.init();
+
+    int writeCount = 10000;
+
+    INFO("Writing " << writeCount << " records of " << sizeof(Point) << " bytes");
+    for(int i = 0; i < writeCount; i++)
+    {
+        Point p { (double)i, (double)i };
+        eeprom.put(0, &p, sizeof(p));
+    }
+
+    REQUIRE(eeprom.store.getEraseCount() < 10);
+}
+
+TEST_CASE("Migration from legacy format", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    StoreManipulator store(eeprom.store);
+
+    store.eraseAll();
+
+    std::ifstream file("eeprom-page1.bin", std::ios::binary | std::ios::ate);
+    std::streamsize size = file.tellg();
+    //WARN("File size " << size);
+    file.seekg(0, std::ios::beg);
+    std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
+
+    file.read((char *)buffer.get(), size);
+
+    eeprom.store.write(PageBase1, buffer.get(), PageSize1);
+
+    eeprom.init();
+
+    //WARN(store.dumpStorage(PageBase1, 30));
+    //WARN(store.dumpStorage(PageBase2, 30));
+
+
+    //WARN("hasPendingErase " << eeprom.hasPendingErase());
+    if(eeprom.hasPendingErase())
+    {
+        eeprom.performPendingErase();
+    }
+
+    //WARN(store.dumpStorage(PageBase1, 30));
+    //WARN(store.dumpStorage(PageBase2, 30));
+
+    struct GeoPoint
+    {
+        double latitude;
+        double longitude;
+
+        bool valid()
+        {
+            return !std::isnan(latitude) && !std::isnan(longitude);
+        }
+    };
+
+    GeoPoint point;
+
+    eeprom.get(0, &point, sizeof(point));
+
+    //WARN("point valid=" << point.valid() << " " << point.latitude << ", " << point.longitude);
+
+    if(!point.valid())
+    {
+        point.latitude = 0;
+        point.longitude = 0;
+    }
+
+    point.latitude += 1;
+    point.longitude += 1;
+
+    eeprom.put(0, &point, sizeof(point));
+
+    //WARN(store.dumpStorage(PageBase1, 30));
+    //WARN(store.dumpStorage(PageBase2, 30));
+
+    //WARN("hasPendingErase " << eeprom.hasPendingErase());
+    if(eeprom.hasPendingErase())
+    {
+        eeprom.performPendingErase();
+    }
+
+    //WARN(store.dumpStorage(PageBase1, 30));
+    //WARN(store.dumpStorage(PageBase2, 30));
 }
