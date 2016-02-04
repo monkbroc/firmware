@@ -19,6 +19,7 @@ const size_t PageSize2 = TestPageSize / 4;
 
 using TestStore = RAMFlashStorage<TestBase, TestPageCount, TestPageSize>;
 using TestEEPROM = EEPROMEmulation<TestStore, PageBase1, PageSize1, PageBase2, PageSize2>;
+using Record = TestEEPROM::Record;
 
 // Alias some constants, otherwise the linker is having issues when
 // those are used inside REQUIRE() tests
@@ -30,98 +31,69 @@ auto PAGE_ERASED = TestEEPROM::PageHeader::ERASED;
 auto PAGE_COPY = TestEEPROM::PageHeader::COPY;
 auto PAGE_ACTIVE = TestEEPROM::PageHeader::ACTIVE;
 auto PAGE_INACTIVE = TestEEPROM::PageHeader::INACTIVE;
-auto PAGE_LEGACY_ACTIVE = TestEEPROM::PageHeader::LEGACY_ACTIVE;
 
-// Decorator class for RAMFlashStorage to pre-write EEPROM records or
-// validate written records
-class StoreManipulator
+// Test helper class to pre-write EEPROM records and validate written
+// records
+class EEPROMTester
 {
 public:
-    StoreManipulator(TestStore &store) : store(store)
+    EEPROMTester(TestEEPROM &eeprom)
+        : eeprom(eeprom)
     {
     }
 
-    TestStore &store;
-
-    void eraseAll()
+    // Populate a page of flash with a status and 0 or more records
+    void populate(uintptr_t address,
+            uint32_t pageStatus,
+            std::initializer_list<Record> recordList = {})
     {
-        store.eraseSector(PageBase1);
-        store.eraseSector(PageBase2);
+        eeprom.store.eraseSector(address);
+
+        eeprom.store.write(address, &pageStatus, sizeof(pageStatus));
+        address += sizeof(pageStatus);
+
+        for(auto record: recordList)
+        {
+            eeprom.store.write(address, &record, sizeof(record));
+            address += sizeof(record);
+        }
     }
 
-    uintptr_t recordAddress(uintptr_t baseAddress, uint16_t index)
+    // Validate that a page of flash matches exactly the expected status
+    // and records, including having erased space after the last expected record
+    void requireContents(intptr_t address,
+            uint32_t expectedPageStatus,
+            std::initializer_list<Record> expectedRecordList = {})
     {
-        // Page header is 2 bytes, each record is 4 bytes
-        return baseAddress + 2 + 4 * index;
-    }
+        uint32_t pageStatus;
+        eeprom.store.read(address, &pageStatus, sizeof(pageStatus));
+        INFO("Unexpected page status at 0x" << std::hex << address);
+        REQUIRE(pageStatus == expectedPageStatus);
+        address += sizeof(pageStatus);
 
-    void writePageStatus(uintptr_t address, uint16_t status)
-    {
-        store.write(address, &status, sizeof(status));
-    }
+        for(auto expectedRecord: expectedRecordList)
+        {
+            Record record;
+            eeprom.store.read(address, &record, sizeof(record));
+            address += sizeof(record);
+            INFO("Unexpected record at 0x" << std::hex << address);
+            REQUIRE(std::memcmp(&record, &expectedRecord, sizeof(record)) == 0);
+        }
 
-    uint16_t readPageStatus(uintptr_t address)
-    {
-        uint16_t status;
-        store.read(address, &status, sizeof(status));
-        return status;
-    }
-
-    void requirePageStatus(uintptr_t address, uint16_t expectedStatus)
-    {
-        REQUIRE(readPageStatus(address) == expectedStatus);
-    }
-
-    // Interrupted record write 1: invalid status, index and data written
-    uintptr_t writeInvalidRecord(uintptr_t address, uint16_t index, uint8_t data)
-    {
-        TestEEPROM::Record record(TestEEPROM::Record::INVALID, index, data);
-        store.write(address, &record, sizeof(record));
-
-        return address + sizeof(record);
-    }
-
-    // Completely written record
-    uintptr_t writeRecord(uintptr_t address, uint16_t index, uint8_t data)
-    {
-        TestEEPROM::Record record(TestEEPROM::Record::VALID, index, data);
-        store.write(address, &record, sizeof(record));
-
-        return address + sizeof(record);
-    }
-
-    // Validates that a specific record was correctly written at the specified address
-    uintptr_t requireValidRecord(uintptr_t address, uint16_t index, uint8_t expectedData)
-    {
-        TestEEPROM::Record record;
-        store.read(address, &record, sizeof(record));
-
-        auto status = TestEEPROM::Record::VALID;
-        REQUIRE(record.status == status);
-        REQUIRE(record.index == index);
-        REQUIRE(record.data == expectedData);
-
-        return address + sizeof(record);
-    }
-
-    // Validate that a specific address has no record (erased space)
-    uintptr_t requireEmptyRecord(uintptr_t address)
-    {
-        TestEEPROM::Record erasedRecord, record;
-        store.read(address, &record, sizeof(record));
-        REQUIRE(std::memcmp(&record, &erasedRecord, sizeof(record)) == 0);
-
-        return address + sizeof(record);
+        uint32_t erased;
+        eeprom.store.read(address, &erased, sizeof(erased));
+        INFO("Expected erased space at 0x" << std::hex << address);
+        REQUIRE(erased == 0xFFFFFFFF);
     }
 
     // Debugging helper to view the storage contents
     // Usage:
-    // WARN(store.dumpStorage(PageBase1, 30));
+    // WARN(tester.dumpStorage(PageBase1, 30));
     std::string dumpStorage(uintptr_t address, uint16_t length)
     {
         std::stringstream ss;
-        const uint8_t *begin = store.dataAt(address);
-        const uint8_t *end = &begin[length];
+        const uint8_t *begin = eeprom.store.dataAt(address);
+        const uint8_t *end = eeprom.store.dataAt(address + length);
 
         ss << std::hex << address << ": ";
         while(begin < end)
@@ -131,6 +103,9 @@ public:
         }
         return ss.str();
     }
+private:
+
+    TestEEPROM &eeprom;
 };
 
 TEST_CASE("Get byte", "[eeprom]")
@@ -406,7 +381,7 @@ TEST_CASE("Get multi-byte", "[eeprom]")
 TEST_CASE("Put record", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
+    EEPROMTester tester(eeprom);
 
     eeprom.init();
 
@@ -418,8 +393,9 @@ TEST_CASE("Put record", "[eeprom]")
         {
             eeprom.put(eepromIndex, 0xCC);
 
-            uint32_t address = store.recordAddress(PageBase1, 0);
-            store.requireValidRecord(address, eepromIndex, 0xCC);
+            tester.requireContents(PageBase1, PAGE_ACTIVE, {
+                Record(Record::VALID, eepromIndex, 0xCC)
+            });
         }
 
         THEN("get returns the put record")
@@ -467,8 +443,10 @@ TEST_CASE("Put record", "[eeprom]")
         {
             eeprom.put(eepromIndex, 0xDD);
 
-            uint32_t address = store.recordAddress(PageBase1, 1);
-            store.requireValidRecord(address, eepromIndex, 0xDD);
+            tester.requireContents(PageBase1, PAGE_ACTIVE, {
+                Record(Record::VALID, eepromIndex, 0xCC),
+                Record(Record::VALID, eepromIndex, 0xDD)
+            });
         }
 
         THEN("get returns the put record")
@@ -486,27 +464,25 @@ TEST_CASE("Put record", "[eeprom]")
     {
         eeprom.put(eepromIndex, 0xCC);
 
-        uintptr_t originalEmptyAddress = eeprom.findEmptyAddress(eeprom.getActivePage());
-
         THEN("put doesn't create a new copy of the record")
         {
             eeprom.put(eepromIndex, 0xCC);
 
-            uintptr_t emptyAddress = eeprom.findEmptyAddress(eeprom.getActivePage());
-            REQUIRE(emptyAddress == originalEmptyAddress);
+            tester.requireContents(PageBase1, PAGE_ACTIVE, {
+                Record(Record::VALID, eepromIndex, 0xCC)
+            });
         }
     }
 
     SECTION("The address is out of range")
     {
-        uintptr_t originalEmptyAddress = eeprom.findEmptyAddress(eeprom.getActivePage());
-
         THEN("put doesn't create a new record")
         {
             eeprom.put(65000, 0xEE);
 
-            uintptr_t emptyAddress = eeprom.findEmptyAddress(eeprom.getActivePage());
-            REQUIRE(emptyAddress == originalEmptyAddress);
+            tester.requireContents(PageBase1, PAGE_ACTIVE, {
+                /* no records */
+            });
         }
     }
 
@@ -544,7 +520,7 @@ TEST_CASE("Capacity", "[eeprom]")
 TEST_CASE("Initialize EEPROM", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
+    EEPROMTester tester(eeprom);
 
     SECTION("Random flash")
     {
@@ -552,49 +528,50 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
 
         THEN("Page 1 is active, page 2 is erased")
         {
-            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
-            store.requirePageStatus(PageBase2, PAGE_ERASED);
+            tester.requireContents(PageBase1, PAGE_ACTIVE);
+            tester.requireContents(PageBase2, PAGE_ERASED);
         }
     }
 
     SECTION("Erased flash")
     {
-        store.eraseAll();
+        tester.populate(PageBase1, PAGE_ERASED);
+        tester.populate(PageBase2, PAGE_ERASED);
 
         eeprom.init();
 
         THEN("Page 1 is active, page 2 is erased")
         {
-            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
-            store.requirePageStatus(PageBase2, PAGE_ERASED);
+            tester.requireContents(PageBase1, PAGE_ACTIVE);
+            tester.requireContents(PageBase2, PAGE_ERASED);
         }
     }
 
     SECTION("Page 1 active")
     {
-        store.eraseAll();
-        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase2, PAGE_ERASED);
 
         eeprom.init();
 
         THEN("Page 1 remains active, page 2 remains erased")
         {
-            store.requirePageStatus(PageBase1, PAGE_ACTIVE);
-            store.requirePageStatus(PageBase2, PAGE_ERASED);
+            tester.requireContents(PageBase1, PAGE_ACTIVE);
+            tester.requireContents(PageBase2, PAGE_ERASED);
         }
     }
 
     SECTION("Page 2 active")
     {
-        store.eraseAll();
-        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ERASED);
+        tester.populate(PageBase2, PAGE_ACTIVE);
 
         eeprom.init();
 
         THEN("Page 1 remains erased, page 2 remains active")
         {
-            store.requirePageStatus(PageBase1, PAGE_ERASED);
-            store.requirePageStatus(PageBase2, PAGE_ACTIVE);
+            tester.requireContents(PageBase1, PAGE_ERASED);
+            tester.requireContents(PageBase2, PAGE_ACTIVE);
         }
     }
 }
@@ -602,15 +579,19 @@ TEST_CASE("Initialize EEPROM", "[eeprom]")
 TEST_CASE("Clear", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
+    EEPROMTester tester(eeprom);
 
     eeprom.init();
+    // Add some records
+    eeprom.put(0, 0xAA);
+    eeprom.put(1, 0xBB);
+
     eeprom.clear();
 
     THEN("Page 1 is active, page 2 is erased")
     {
-        store.requirePageStatus(PageBase1, PAGE_ACTIVE);
-        store.requirePageStatus(PageBase2, PAGE_ERASED);
+        tester.requireContents(PageBase1, PAGE_ACTIVE);
+        tester.requireContents(PageBase2, PAGE_ERASED);
     }
 }
 
@@ -643,22 +624,25 @@ TEST_CASE("Verify page", "[eeprom]")
 TEST_CASE("Active page", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    store.eraseAll();
+    EEPROMTester tester(eeprom);
 
     SECTION("No valid page")
     {
         SECTION("Page 1 erased, page 2 erased (blank flash)")
         {
+            tester.populate(PageBase1, PAGE_ERASED);
+            tester.populate(PageBase2, PAGE_ERASED);
+
             eeprom.updateActivePage();
+
             REQUIRE(eeprom.getActivePage() == NoPage);
         }
 
         SECTION("Page 1 garbage, page 2 garbage (invalid state)")
         {
-            store.writePageStatus(PageBase1, 999);
-            store.writePageStatus(PageBase2, 999);
+            tester.populate(PageBase1, 0xDEADC0DE);
+            tester.populate(PageBase2, 0xDEADC0DE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == NoPage);
@@ -669,7 +653,9 @@ TEST_CASE("Active page", "[eeprom]")
     {
         SECTION("Page 1 active, page 2 erased (normal case)")
         {
-            store.writePageStatus(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase2, PAGE_ERASED);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page1);
@@ -680,8 +666,9 @@ TEST_CASE("Active page", "[eeprom]")
     {
         SECTION("Page 1 active, page 2 copy (interrupted swap)")
         {
-            store.writePageStatus(PageBase1, PAGE_ACTIVE);
-            store.writePageStatus(PageBase2, PAGE_COPY);
+            tester.populate(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase2, PAGE_COPY);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page1);
@@ -689,11 +676,22 @@ TEST_CASE("Active page", "[eeprom]")
 
         SECTION("Page 1 active, page 2 active (almost completed swap)")
         {
-            store.writePageStatus(PageBase1, PAGE_ACTIVE);
-            store.writePageStatus(PageBase2, PAGE_ACTIVE);
+            tester.populate(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase2, PAGE_ACTIVE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page1);
+        }
+        
+        SECTION("Page 1 inactive, page 2 active (completed swap, pending erase)")
+        {
+            tester.populate(PageBase1, PAGE_INACTIVE);
+            tester.populate(PageBase2, PAGE_ACTIVE);
+
+            eeprom.updateActivePage();
+
+            REQUIRE(eeprom.getActivePage() == Page2);
         }
     }
 
@@ -701,7 +699,9 @@ TEST_CASE("Active page", "[eeprom]")
     {
         SECTION("Page 1 erased, page 2 active (normal case)")
         {
-            store.writePageStatus(PageBase2, PAGE_ACTIVE);
+            tester.populate(PageBase1, PAGE_ERASED);
+            tester.populate(PageBase2, PAGE_ACTIVE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page2);
@@ -712,8 +712,9 @@ TEST_CASE("Active page", "[eeprom]")
     {
         SECTION("Page 1 copy, page 2 active (interrupted swap)")
         {
-            store.writePageStatus(PageBase1, PAGE_COPY);
-            store.writePageStatus(PageBase2, PAGE_ACTIVE);
+            tester.populate(PageBase1, PAGE_COPY);
+            tester.populate(PageBase2, PAGE_ACTIVE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page2);
@@ -721,30 +722,22 @@ TEST_CASE("Active page", "[eeprom]")
 
         SECTION("Page 1 active, page 2 active (almost completed swap)")
         {
-            store.writePageStatus(PageBase1, PAGE_ACTIVE);
-            store.writePageStatus(PageBase2, PAGE_ACTIVE);
+            tester.populate(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase2, PAGE_ACTIVE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page1);
         }
-    }
-
-    SECTION("Migration from old page status")
-    {
-        SECTION("Page 1 legacy active, page 2 erased")
+        
+        SECTION("Page 1 active, page 2 inactive (completed swap, pending erase)")
         {
-            store.writePageStatus(PageBase1, PAGE_LEGACY_ACTIVE);
+            tester.populate(PageBase1, PAGE_ACTIVE);
+            tester.populate(PageBase2, PAGE_INACTIVE);
+
             eeprom.updateActivePage();
 
             REQUIRE(eeprom.getActivePage() == Page1);
-        }
-
-        SECTION("Page 1 erase, page 2 legacy active")
-        {
-            store.writePageStatus(PageBase2, PAGE_LEGACY_ACTIVE);
-            eeprom.updateActivePage();
-
-            REQUIRE(eeprom.getActivePage() == Page2);
         }
     }
 }
@@ -752,13 +745,13 @@ TEST_CASE("Active page", "[eeprom]")
 TEST_CASE("Alternate page", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    store.eraseAll();
+    EEPROMTester tester(eeprom);
 
     SECTION("Page 1 is active")
     {
-        store.writePageStatus(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase2, PAGE_ERASED);
+
         eeprom.updateActivePage();
 
         REQUIRE(eeprom.getAlternatePage() == Page2);
@@ -766,7 +759,9 @@ TEST_CASE("Alternate page", "[eeprom]")
 
     SECTION("Page 2 is active")
     {
-        store.writePageStatus(PageBase2, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ERASED);
+        tester.populate(PageBase2, PAGE_ACTIVE);
+
         eeprom.updateActivePage();
 
         REQUIRE(eeprom.getAlternatePage() == Page1);
@@ -782,28 +777,35 @@ TEST_CASE("Alternate page", "[eeprom]")
 TEST_CASE("Copy records to page", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
+    EEPROMTester tester(eeprom);
 
     eeprom.init();
 
-    uint32_t activeIndex = PageBase1 + 2;
-    uint32_t alternateIndex = PageBase2 + 2;
     auto fromPage = Page1;
     auto toPage = Page2;
-    uint16_t exceptRecordIdStart = 0xFFFF;
-    uint16_t exceptRecordIdEnd = 0xFFFF;
+    uintptr_t toAddress = PageBase2;
+    uint16_t exceptIndexBegin = 0xFFFF;
+    uint16_t exceptIndexEnd = 0xFFFF;
 
     uint16_t eepromIndex = 100;
+
+    tester.populate(toAddress, PAGE_COPY);
+
+    auto performCopy = [&] {
+        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptIndexBegin, exceptIndexEnd);
+    };
 
     SECTION("Single record")
     {
         eeprom.put(eepromIndex, 0xBB);
 
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
         THEN("The record is copied")
         {
-            store.requireValidRecord(alternateIndex, eepromIndex, 0xBB);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, eepromIndex, 0xBB)
+            });
         }
     }
 
@@ -812,11 +814,13 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(eepromIndex, 0xBB);
         eeprom.put(eepromIndex, 0xCC);
 
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
-        THEN("The last record is copied, followed by empty space")
+        THEN("The last record is copied")
         {
-            store.requireValidRecord(alternateIndex, eepromIndex, 0xCC);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, eepromIndex, 0xCC)
+            });
         }
     }
 
@@ -828,12 +832,13 @@ TEST_CASE("Copy records to page", "[eeprom]")
             eeprom.put(eepromIndex, 0xEE);
         });
 
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
         THEN("The last valid record is copied")
         {
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndex, 0xCC);
-            alternateIndex = store.requireEmptyRecord(alternateIndex);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, eepromIndex, 0xCC)
+            });
         }
     }
 
@@ -842,71 +847,81 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(eepromIndex, 0xBB);
         eeprom.put(eepromIndex, 0xFF);
 
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
         THEN("The record is not copied")
         {
-            alternateIndex = store.requireEmptyRecord(alternateIndex);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                /* no records */
+            });
         }
     }
 
     SECTION("Multiple records")
     {
-        uint16_t eepromIndexs[] = { 30, 10, 40 };
-        uint8_t record = 0xAA;
+        eeprom.put(3, 0xDD);
+        eeprom.put(1, 0xBB);
+        eeprom.put(0, 0xAA);
+        eeprom.put(2, 0xCC);
 
-        for(auto index : eepromIndexs)
-        {
-            eeprom.put(index, record);
-        }
-
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
         THEN("The records are copied from small ids to large ids")
         {
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndexs[1], record);
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndexs[0], record);
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndexs[2], record);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, 0, 0xAA),
+                Record(Record::VALID, 1, 0xBB),
+                Record(Record::VALID, 2, 0xCC),
+                Record(Record::VALID, 3, 0xDD)
+            });
         }
     }
 
     SECTION("Except specified records")
     {
-        uint16_t eepromIndexs[] = { 30, 10, 40 };
-        uint8_t record = 0xAA;
+        eeprom.put(3, 0xDD);
+        eeprom.put(1, 0xBB);
+        eeprom.put(0, 0xAA);
+        eeprom.put(2, 0xCC);
 
-        for(auto index : eepromIndexs)
-        {
-            eeprom.put(index, record);
-        }
+        exceptIndexBegin = 1;
+        exceptIndexEnd = 3; /* 1 past the last index to avoid copying */
 
-        exceptRecordIdStart = 10;
-        exceptRecordIdEnd = 10;
-
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
+        performCopy();
 
         THEN("The specified records are not copied")
         {
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndexs[0], record);
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndexs[2], record);
-            alternateIndex = store.requireEmptyRecord(alternateIndex);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, 0, 0xAA),
+                Record(Record::VALID, 3, 0xDD)
+            });
         }
     }
 
-    SECTION("With invalid records")
+    SECTION("Multiple records with interrupted block write")
     {
-        eeprom.put(eepromIndex, 0xAA);
-        eeprom.store.discardWritesAfter(1, [&] {
-            eeprom.put(200, 0xEE);
+        eeprom.put(3, 0xDD);
+        eeprom.put(1, 0xBB);
+        eeprom.put(0, 0xAA);
+        eeprom.put(2, 0xCC);
+
+        // It takes 6 writes to write the 3 data records, followed
+        // by the 3 valid statuses, so discard the 6th write
+        eeprom.store.discardWritesAfter(5, [&] {
+            uint8_t partialValues[] = { 1, 2, 3 };
+            eeprom.put(0, partialValues, sizeof(partialValues));
         });
+
+        performCopy();
 
         THEN("Records up to the invalid record are copied")
         {
-            eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptRecordIdStart, exceptRecordIdEnd);
-
-            // The copied record is followed by empty space
-            alternateIndex = store.requireValidRecord(alternateIndex, eepromIndex, 0xAA);
-            alternateIndex = store.requireEmptyRecord(alternateIndex);
+            tester.requireContents(toAddress, PAGE_COPY, {
+                Record(Record::VALID, 0, 0xAA),
+                Record(Record::VALID, 1, 0xBB),
+                Record(Record::VALID, 2, 0xCC),
+                Record(Record::VALID, 3, 0xDD)
+            });
         }
     }
 }
@@ -914,31 +929,34 @@ TEST_CASE("Copy records to page", "[eeprom]")
 TEST_CASE("Swap pages", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    eeprom.init();
-
-    uint32_t activeIndex = PageBase1;
-    uint32_t alternateIndex = PageBase2;
+    EEPROMTester tester(eeprom);
 
     // Write some data
-    uint16_t eepromIndex = 0;
-    uint8_t data[] = { 1, 2, 3 };
-    eeprom.put(eepromIndex, data, sizeof(data));
+    tester.populate(PageBase1, PAGE_ACTIVE, {
+        Record(Record::VALID, 0, 1),
+        Record(Record::VALID, 1, 2),
+        Record(Record::VALID, 2, 3)
+    });
 
     // Have a record to write after the swap
     uint16_t newRecordId = 1;
     uint8_t newData[] = { 20, 30 };
 
+    eeprom.init();
+
     auto requireSwapCompleted = [&]()
     {
-        store.requirePageStatus(activeIndex, PAGE_INACTIVE);
-        store.requirePageStatus(alternateIndex, PAGE_ACTIVE);
+        tester.requireContents(PageBase1, PAGE_INACTIVE, {
+            Record(Record::VALID, 0, 1),
+            Record(Record::VALID, 1, 2),
+            Record(Record::VALID, 2, 3)
+        });
 
-        uintptr_t dataIndex = alternateIndex + 2;
-        dataIndex = store.requireValidRecord(dataIndex, 0, 1);
-        dataIndex = store.requireValidRecord(dataIndex, 1, 20);
-        dataIndex = store.requireValidRecord(dataIndex, 2, 30);
+        tester.requireContents(PageBase2, PAGE_ACTIVE, {
+            Record(Record::VALID, 0, 1),
+            Record(Record::VALID, 1, 20),
+            Record(Record::VALID, 2, 30)
+        });
     };
 
     auto performSwap = [&]()
@@ -956,18 +974,17 @@ TEST_CASE("Swap pages", "[eeprom]")
     SECTION("Interrupted page swap 1: during erase")
     {
         // Garbage status
-        store.writePageStatus(alternateIndex, 999);
-        eeprom.store.setWriteCount(0);
+        tester.populate(PageBase2, 0xDEADC0DE);
 
-        performSwap();
+        eeprom.store.discardWritesAfter(0, [&] {
+            performSwap();
+        });
 
         // Verify that the alternate page is not yet erased
-        store.requirePageStatus(alternateIndex, 999);
+        tester.requireContents(PageBase2, 0xDEADC0DE);
 
         THEN("Redoing the page swap works")
         {
-            eeprom.store.setWriteCount(INT_MAX);
-
             performSwap();
 
             requireSwapCompleted();
@@ -976,16 +993,15 @@ TEST_CASE("Swap pages", "[eeprom]")
 
     SECTION("Interrupted page swap 2: during copy")
     {
-        eeprom.store.setWriteCount(2);
-        performSwap();
+        eeprom.store.discardWritesAfter(2, [&] {
+            performSwap();
+        });
 
         // Verify that the alternate page is still copy
-        store.requirePageStatus(alternateIndex, PAGE_COPY);
+        tester.requireContents(PageBase2, PAGE_COPY);
 
         THEN("Redoing the page swap works")
         {
-            eeprom.store.setWriteCount(INT_MAX);
-
             performSwap();
 
             requireSwapCompleted();
@@ -994,19 +1010,33 @@ TEST_CASE("Swap pages", "[eeprom]")
 
     SECTION("Interrupted page swap 3: before old page becomes inactive")
     {
-        eeprom.store.setWriteCount(5);
-
-        performSwap();
+        eeprom.store.discardWritesAfter(6, [&] {
+            performSwap();
+        });
 
         // Verify that both pages are active
-        store.requirePageStatus(alternateIndex, PAGE_ACTIVE);
-        store.requirePageStatus(activeIndex, PAGE_ACTIVE);
+        tester.requireContents(PageBase1, PAGE_ACTIVE, {
+            Record(Record::VALID, 0, 1),
+            Record(Record::VALID, 1, 2),
+            Record(Record::VALID, 2, 3)
+        });
+
+        tester.requireContents(PageBase2, PAGE_ACTIVE, {
+            Record(Record::VALID, 0, 1),
+            Record(Record::VALID, 1, 20),
+            Record(Record::VALID, 2, 30)
+        });
 
         THEN("Page 1 remains the active page")
         {
-            eeprom.store.setWriteCount(INT_MAX);
-
             REQUIRE(eeprom.getActivePage() == Page1);
+        }
+
+        THEN("Redoing the page swap works")
+        {
+            performSwap();
+
+            requireSwapCompleted();
         }
     }
 }
@@ -1014,16 +1044,13 @@ TEST_CASE("Swap pages", "[eeprom]")
 TEST_CASE("Erasable page", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
-
-    store.eraseAll();
-
-    uint32_t activeIndex = PageBase1;
-    uint32_t alternateIndex = PageBase2;
+    EEPROMTester tester(eeprom);
 
     SECTION("One active page, one erased page")
     {
-        store.writePageStatus(activeIndex, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase2, PAGE_ERASED);
+
         eeprom.updateActivePage();
 
         THEN("No page needs to be erased")
@@ -1035,8 +1062,9 @@ TEST_CASE("Erasable page", "[eeprom]")
 
     SECTION("One active page, one inactive page")
     {
-        store.writePageStatus(activeIndex, PAGE_ACTIVE);
-        store.writePageStatus(alternateIndex, PAGE_INACTIVE);
+        tester.populate(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase2, PAGE_INACTIVE);
+
         eeprom.updateActivePage();
 
         THEN("The old page needs to be erased")
@@ -1056,8 +1084,9 @@ TEST_CASE("Erasable page", "[eeprom]")
 
     SECTION("2 active pages")
     {
-        store.writePageStatus(activeIndex, PAGE_ACTIVE);
-        store.writePageStatus(alternateIndex, PAGE_ACTIVE);
+        tester.populate(PageBase1, PAGE_ACTIVE);
+        tester.populate(PageBase2, PAGE_ACTIVE);
+
         eeprom.updateActivePage();
 
         THEN("Page 2 needs to be erased")
@@ -1087,78 +1116,75 @@ TEST_CASE("Flash wear validation", "[eeprom]")
         eeprom.put(0, &p, sizeof(p));
     }
 
-    REQUIRE(eeprom.store.getEraseCount() < 10);
+    int maxExpectedErases = 10;
+    INFO("Expected less than " << maxExpectedErases << " erases");
+    REQUIRE(eeprom.store.getEraseCount() < maxExpectedErases);
 }
 
 TEST_CASE("Migration from legacy format", "[eeprom]")
 {
     TestEEPROM eeprom;
-    StoreManipulator store(eeprom.store);
 
-    store.eraseAll();
+    eeprom.store.eraseSector(PageBase1);
+    eeprom.store.eraseSector(PageBase2);
 
+    // Load EEPROM extracted from a Photon into memory
     std::ifstream file("eeprom-page1.bin", std::ios::binary | std::ios::ate);
     std::streamsize size = file.tellg();
-    //WARN("File size " << size);
     file.seekg(0, std::ios::beg);
     std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
-
     file.read((char *)buffer.get(), size);
-
     eeprom.store.write(PageBase1, buffer.get(), PageSize1);
 
     eeprom.init();
 
-    //WARN(store.dumpStorage(PageBase1, 30));
-    //WARN(store.dumpStorage(PageBase2, 30));
+    REQUIRE(eeprom.getActivePage() == Page1);
 
-
-    //WARN("hasPendingErase " << eeprom.hasPendingErase());
-    if(eeprom.hasPendingErase())
+    // Instances of this struct were saved in the EEPROM
+    struct Point
     {
-        eeprom.performPendingErase();
-    }
-
-    //WARN(store.dumpStorage(PageBase1, 30));
-    //WARN(store.dumpStorage(PageBase2, 30));
-
-    struct GeoPoint
-    {
-        double latitude;
-        double longitude;
+        double x, y;
 
         bool valid()
         {
-            return !std::isnan(latitude) && !std::isnan(longitude);
+            return !std::isnan(x) && !std::isnan(y);
         }
     };
 
-    GeoPoint point;
+    Point point;
 
+    // Make sure the old EEPROM format can be read
     eeprom.get(0, &point, sizeof(point));
+    REQUIRE(point.valid() == true);
+    REQUIRE(point.x == 21092.0);
+    REQUIRE(point.y == 21095.0);
 
-    //WARN("point valid=" << point.valid() << " " << point.latitude << ", " << point.longitude);
-
-    if(!point.valid())
+    // EEPROM was almost full so write a few more records...
+    for(int i = 0; i < 2; i++)
     {
-        point.latitude = 0;
-        point.longitude = 0;
+        point.x += 1;
+        point.y += 1;
+
+        eeprom.put(0, &point, sizeof(point));
     }
 
-    point.latitude += 1;
-    point.longitude += 1;
+    REQUIRE(eeprom.getActivePage() == Page1);
+
+    // ...then write another one to trigger a page swap
+    point.x += 1;
+    point.y += 1;
 
     eeprom.put(0, &point, sizeof(point));
 
-    //WARN(store.dumpStorage(PageBase1, 30));
-    //WARN(store.dumpStorage(PageBase2, 30));
+    REQUIRE(eeprom.getActivePage() == Page2);
 
-    //WARN("hasPendingErase " << eeprom.hasPendingErase());
-    if(eeprom.hasPendingErase())
-    {
-        eeprom.performPendingErase();
-    }
+    REQUIRE(eeprom.hasPendingErase() == true);
+    eeprom.performPendingErase();
+    REQUIRE(eeprom.hasPendingErase() == false);
 
-    //WARN(store.dumpStorage(PageBase1, 30));
-    //WARN(store.dumpStorage(PageBase2, 30));
+    // Data is still valid
+    eeprom.get(0, &point, sizeof(point));
+    REQUIRE(point.valid() == true);
+    REQUIRE(point.x == 21095.0);
+    REQUIRE(point.y == 21098.0);
 }

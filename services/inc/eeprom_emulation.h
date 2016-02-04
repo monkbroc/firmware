@@ -116,18 +116,17 @@ public:
     // instances of this struct are persisted in the flash memory
     struct __attribute__((packed)) PageHeader
     {
-        static const uint16_t ERASED = 0xFFFF;
-        static const uint16_t COPY = 0x0FFF;
-        static const uint16_t ACTIVE = 0x00FF;
-        static const uint16_t INACTIVE = 0x000F;
+        // These status were selected for compatibility with the old
+        // EEPROM emulation code: the lower 16 bits correspond to the
+        // old statuses
+        static const uint32_t ERASED   = 0xFFFFFFFF;
+        static const uint32_t COPY     = 0xFFFFEEEE;
+        static const uint32_t ACTIVE   = 0xFFFF0000;
+        static const uint32_t INACTIVE = 0xFF000000;
 
-        // The previous implementation used 0 as an active status, but
-        // we need inactive to be writable after active
-        static const uint16_t LEGACY_ACTIVE = 0x0000;
+        uint32_t status;
 
-        uint16_t status;
-
-        PageHeader(uint16_t status = ERASED) : status(status)
+        PageHeader(uint32_t status = ERASED) : status(status)
         {
         }
     };
@@ -144,12 +143,14 @@ public:
 
         static const uint16_t EMPTY_INDEX = 0xFFFF;
 
-        uint16_t index;
-        uint8_t status;
         uint8_t data;
+        uint8_t status;
+        uint16_t index;
 
-        Record(uint16_t status = EMPTY, uint16_t index = EMPTY_INDEX, uint8_t data = FLASH_ERASED)
-            : index(index), status(status), data(data)
+        Record(uint16_t status = EMPTY,
+                uint16_t index = EMPTY_INDEX,
+                uint8_t data = FLASH_ERASED)
+            : data(data), status(status), index(index)
         {
         }
     };
@@ -237,7 +238,7 @@ public:
     /* Implementation */
 
     // Start address of the page
-    uintptr_t getPageStart(LogicalPage page)
+    uintptr_t getPageBegin(LogicalPage page)
     {
         switch(page)
         {
@@ -273,8 +274,8 @@ public:
     // and which one should be used as the target of the page swap
     void updateActivePage()
     {
-        uint16_t status1 = readPageStatus(LogicalPage::Page1);
-        uint16_t status2 = readPageStatus(LogicalPage::Page2);
+        uint32_t status1 = readPageStatus(LogicalPage::Page1);
+        uint32_t status2 = readPageStatus(LogicalPage::Page2);
 
         // Pick the first active page
         if(status1 == PageHeader::ACTIVE)
@@ -283,17 +284,6 @@ public:
             alternatePage = LogicalPage::Page2;
         }
         else if(status2 == PageHeader::ACTIVE)
-        {
-            activePage = LogicalPage::Page2;
-            alternatePage = LogicalPage::Page1;
-        }
-        // If no page is active, use a legagy page
-        else if(status1 == PageHeader::LEGACY_ACTIVE)
-        {
-            activePage = LogicalPage::Page1;
-            alternatePage = LogicalPage::Page2;
-        }
-        else if(status2 == PageHeader::LEGACY_ACTIVE)
         {
             activePage = LogicalPage::Page2;
             alternatePage = LogicalPage::Page1;
@@ -318,30 +308,30 @@ public:
     }
 
     // Get the current status of a page (empty, active, being copied, ...)
-    uint16_t readPageStatus(LogicalPage page)
+    uint32_t readPageStatus(LogicalPage page)
     {
-        PageHeader *header = (PageHeader *) store.dataAt(getPageStart(page));
+        PageHeader *header = (PageHeader *) store.dataAt(getPageBegin(page));
         return header->status;
     }
 
     // Update the status of a page
-    bool writePageStatus(LogicalPage page, uint16_t status)
+    bool writePageStatus(LogicalPage page, uint32_t status)
     {
         PageHeader header = { status };
-        return store.write(getPageStart(page), &header, sizeof(header)) == 0;
+        return store.write(getPageBegin(page), &header, sizeof(header)) == 0;
     }
 
     // Iterate through a page to extract the latest value of each address
-    void readRange(uint16_t startIndex, uint8_t *data, uint16_t length)
+    void readRange(uint16_t beginIndex, uint8_t *data, uint16_t length)
     {
         std::memset(data, FLASH_ERASED, length);
 
-        uint16_t endIndex = startIndex + length;
+        uint16_t endIndex = beginIndex + length;
         forEachValidRecord(getActivePage(), [&](uintptr_t address, const Record &record)
         {
-            if(record.index >= startIndex && record.index <= endIndex)
+            if(record.index >= beginIndex && record.index < endIndex)
             {
-                data[record.index - startIndex] = record.data;
+                data[record.index - beginIndex] = record.data;
             }
         });
     }
@@ -352,10 +342,10 @@ public:
     // go back and write records as valid in decreasing order of
     // index. This ensures data consistency if writeRange is
     // interrupted by a reset.
-    void writeRange(uint16_t startIndex, const uint8_t *data, uint16_t length)
+    void writeRange(uint16_t beginIndex, const uint8_t *data, uint16_t length)
     {
         // don't write anything if index is out of range
-        if(startIndex + length >= capacity())
+        if(beginIndex + length >= capacity())
         {
             return;
         }
@@ -367,7 +357,7 @@ public:
         {
             return;
         }
-        readRange(startIndex, existingData.get(), length);
+        readRange(beginIndex, existingData.get(), length);
 
         // Make sure there are no previous invalid records before
         // starting to write
@@ -378,8 +368,11 @@ public:
         {
             if(existingData[i] != data[i])
             {
-                uint16_t index = startIndex + i;
-                success = success && writeRecord(getActivePage(), index, data[i], Record::INVALID);
+                uint16_t index = beginIndex + i;
+                success = success && writeRecord(getActivePage(),
+                                                 index,
+                                                 data[i],
+                                                 Record::INVALID);
             }
         }
 
@@ -397,7 +390,7 @@ public:
         // records
         if(!success)
         {
-            swapPagesAndWrite(startIndex, data, length);
+            swapPagesAndWrite(beginIndex, data, length);
         }
     }
 
@@ -424,14 +417,17 @@ public:
     // Checks if there are any invalid records in a page
     bool hasInvalidRecords(LogicalPage page)
     {
-        return findLastInvalidAddress(page) != getPageStart(page);
+        return findLastInvalidAddress(page) != getPageBegin(page);
     }
 
     // Write a record to the first empty space available in a page
     //
     // Returns false when write was unsuccessful to protect against
     // marginal erase, true on proper write
-    bool writeRecord(LogicalPage page, uint16_t index, uint8_t data, uint16_t status = Record::VALID)
+    bool writeRecord(LogicalPage page,
+            uint16_t index,
+            uint8_t data,
+            uint16_t status = Record::VALID)
     {
         uintptr_t address = findEmptyAddress(page);
         size_t spaceRemaining = getPageEnd(page) - address;
@@ -464,7 +460,7 @@ public:
     template <typename Func>
     void forEachRecord(LogicalPage page, Func f)
     {
-        uintptr_t address = getPageStart(page);
+        uintptr_t address = getPageBegin(page);
         uintptr_t endAddress = getPageEnd(page);
 
         // Skip page header
@@ -493,10 +489,10 @@ public:
     void forEachInvalidRecord(LogicalPage page, Func f)
     {
         uintptr_t address = findLastInvalidAddress(page);
-        uintptr_t startAddress = getPageStart(page);
+        uintptr_t beginAddress = getPageBegin(page);
 
         // Walk through record list
-        while(address > startAddress)
+        while(address > beginAddress)
         {
             const Record &record = *(const Record *) store.dataAt(address);
 
@@ -520,7 +516,7 @@ public:
     // page if no records are invalid
     uintptr_t findLastInvalidAddress(LogicalPage page)
     {
-        uintptr_t lastInvalidAddress = getPageStart(page);
+        uintptr_t lastInvalidAddress = getPageBegin(page);
         forEachRecord(page, [&](uintptr_t address, const Record &record) -> bool
         {
             if(record.status == Record::EMPTY)
@@ -570,7 +566,7 @@ public:
         do
         {
             nextRecordFound = false;
-            currentIndex = UINT16_MAX;
+            currentIndex = capacity() - 1;
             forEachValidRecord(page, [&](uintptr_t address, const Record &record)
             {
                 if(record.index <= currentIndex && (int32_t)record.index > previousIndex)
@@ -596,7 +592,7 @@ public:
     // during page erase
     bool verifyPage(LogicalPage page)
     {
-        const uint8_t *begin = store.dataAt(getPageStart(page));
+        const uint8_t *begin = store.dataAt(getPageBegin(page));
         const uint8_t *end = store.dataAt(getPageEnd(page));
         while(begin < end)
         {
@@ -612,14 +608,14 @@ public:
     // Reset entire page to 0xFF
     void erasePage(LogicalPage page)
     {
-        store.eraseSector(getPageStart(page));
+        store.eraseSector(getPageBegin(page));
     }
 
     // Write all valid records from the active page to the alternate
     // page. Erase the alternate page if it is not already erased.
     // Then write the new record to the alternate page.
     // Then erase the old active page
-    bool swapPagesAndWrite(uint16_t startIndex, const uint8_t *data, uint16_t length)
+    bool swapPagesAndWrite(uint16_t beginIndex, const uint8_t *data, uint16_t length)
     {
         LogicalPage sourcePage = getActivePage();
         LogicalPage destinationPage = getAlternatePage();
@@ -639,14 +635,17 @@ public:
             success = success && writePageStatus(destinationPage, PageHeader::COPY);
 
             // Copy records from source to destination
-            success = success && copyAllRecordsToPageExcept(sourcePage, destinationPage, startIndex, startIndex + length);
+            success = success && copyAllRecordsToPageExcept(sourcePage,
+                                                            destinationPage,
+                                                            beginIndex,
+                                                            beginIndex + length);
 
             // Uncomment to simulate a marginal write error. This would be
             // hard to do automatically from the unit test...
             //if(tries == 0)
             //{
             //    uint32_t garbage = 0xDEADBEEF;
-            //    store.write(getPageStart(destinationPage) + 10, &garbage, sizeof(garbage));
+            //    store.write(getPageBegin(destinationPage) + 10, &garbage, sizeof(garbage));
             //    success = false;
             //}
 
@@ -656,7 +655,7 @@ public:
                 // Don't bother writing records that are 0xFF
                 if(data[i] != FLASH_ERASED)
                 {
-                    uint16_t index = startIndex + i;
+                    uint16_t index = beginIndex + i;
                     success = success && writeRecord(destinationPage, index, data[i]);
                 }
             }
@@ -677,13 +676,13 @@ public:
     // Perform the actual copy of records during page swap
     bool copyAllRecordsToPageExcept(LogicalPage sourcePage,
             LogicalPage destinationPage,
-            uint16_t exceptIndexStart,
+            uint16_t exceptIndexBegin,
             uint16_t exceptIndexEnd)
     {
         bool success = true;
         forEachSortedValidRecord(sourcePage, [&](uintptr_t address, const Record &record)
         {
-            if(record.index < exceptIndexStart || record.index > exceptIndexEnd)
+            if(!(record.index >= exceptIndexBegin && record.index < exceptIndexEnd))
             {
                 // Don't bother writing records that are 0xFF
                 if(record.data != FLASH_ERASED)
