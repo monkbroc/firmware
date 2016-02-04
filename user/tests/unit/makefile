@@ -86,7 +86,7 @@ ALLOBJ += $(addprefix $(BUILD_PATH), $(CPPSRC:.cpp=.o))
 ALLDEPS += $(addprefix $(BUILD_PATH), $(CSRC:.c=.o.d))
 ALLDEPS += $(addprefix $(BUILD_PATH), $(CPPSRC:.cpp=.o.d))
 
-all: runner
+all: runner run
 
 run:
 	$(TARGETDIR)$(TARGET)
