@@ -1121,20 +1121,31 @@ TEST_CASE("Flash wear validation", "[eeprom]")
     REQUIRE(eeprom.store.getEraseCount() < maxExpectedErases);
 }
 
+void loadEEPROMFromFile(const char *filename, TestEEPROM &eeprom, uintptr_t pageAddress, size_t pageSize)
+{
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if(!file)
+    {
+        FAIL("Could not load EEPROM dump " << filename);
+        return;
+    }
+
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
+    file.read((char *)buffer.get(), size);
+
+    eeprom.store.eraseSector(pageAddress);
+    eeprom.store.write(pageAddress, buffer.get(), std::min(size, pageSize));
+}
+
 TEST_CASE("Migration from legacy format", "[eeprom]")
 {
     TestEEPROM eeprom;
 
-    eeprom.store.eraseSector(PageBase1);
-    eeprom.store.eraseSector(PageBase2);
-
     // Load EEPROM extracted from a Photon into memory
-    std::ifstream file("eeprom-page1.bin", std::ios::binary | std::ios::ate);
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
-    file.read((char *)buffer.get(), size);
-    eeprom.store.write(PageBase1, buffer.get(), PageSize1);
+    loadEEPROMFromFile("eeprom_page1.bin", eeprom, PageBase1, PageSize1);
+    eeprom.store.eraseSector(PageBase2);
 
     eeprom.init();
 
@@ -1187,4 +1198,30 @@ TEST_CASE("Migration from legacy format", "[eeprom]")
     REQUIRE(point.valid() == true);
     REQUIRE(point.x == 21095.0);
     REQUIRE(point.y == 21098.0);
+}
+
+TEST_CASE("Recover from data corruption", "[eeprom]")
+{
+    TestEEPROM eeprom;
+
+    // Load corrupted EEPROM extracted from a Photon into memory
+    loadEEPROMFromFile("corrupted_eeprom_page1.bin", eeprom, PageBase1, PageSize1);
+    loadEEPROMFromFile("corrupted_eeprom_page2.bin", eeprom, PageBase2, PageSize2);
+
+    eeprom.init();
+
+    uint8_t number;
+
+    eeprom.get(0, number);
+
+    REQUIRE(number != 0xFF);
+
+    number = 100;
+
+    eeprom.put(0, number);
+
+    uint8_t newNumber;
+    eeprom.get(0, newNumber);
+
+    REQUIRE(newNumber == number);
 }

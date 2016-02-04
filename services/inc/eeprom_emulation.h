@@ -327,7 +327,7 @@ public:
         std::memset(data, FLASH_ERASED, length);
 
         uint16_t endIndex = beginIndex + length;
-        forEachValidRecord(getActivePage(), [&](uintptr_t address, const Record &record)
+        forEachValidRecord(getActivePage(), [=](uintptr_t address, const Record &record)
         {
             if(record.index >= beginIndex && record.index < endIndex)
             {
