@@ -22,7 +22,7 @@ using TestEEPROM = EEPROMEmulation<TestStore, PageBase1, PageSize1, PageBase2, P
 using Record = TestEEPROM::Record;
 
 // Alias some constants, otherwise the linker is having issues when
-// those are used inside REQUIRE() tests
+// those are used inside REQUIRE() assertions
 auto NoPage = TestEEPROM::LogicalPage::NoPage;
 auto Page1 = TestEEPROM::LogicalPage::Page1;
 auto Page2 = TestEEPROM::LogicalPage::Page2;
@@ -42,7 +42,7 @@ public:
     {
     }
 
-    // Populate a page of flash with a status and 0 or more records
+    // Populate a page of flash with a page header and 0 or more records
     void populate(uintptr_t address,
             uint32_t pageStatus,
             std::initializer_list<Record> recordList = {})
@@ -59,7 +59,7 @@ public:
         }
     }
 
-    // Validate that a page of flash matches exactly the expected status
+    // Validate that a page of flash matches exactly the expected page header
     // and records, including having erased space after the last expected record
     void requireContents(intptr_t address,
             uint32_t expectedPageStatus,
@@ -497,7 +497,7 @@ TEST_CASE("Put record", "[eeprom]")
         }
 
         REQUIRE(eeprom.getActivePage() == Page1);
-
+    
         THEN("The next write performs a page swap")
         {
             uint8_t newRecord = 0;
@@ -774,36 +774,30 @@ TEST_CASE("Alternate page", "[eeprom]")
     }
 }
 
-TEST_CASE("Copy records to page", "[eeprom]")
+TEST_CASE("Copy records during page swap", "[eeprom]")
 {
     TestEEPROM eeprom;
     EEPROMTester tester(eeprom);
 
     eeprom.init();
 
-    auto fromPage = Page1;
-    auto toPage = Page2;
+    uint16_t eepromIndex = 0;
     uintptr_t toAddress = PageBase2;
-    uint16_t exceptIndexBegin = 0xFFFF;
-    uint16_t exceptIndexEnd = 0xFFFF;
 
-    uint16_t eepromIndex = 100;
-
-    tester.populate(toAddress, PAGE_COPY);
-
-    auto performCopy = [&] {
-        eeprom.copyAllRecordsToPageExcept(fromPage, toPage, exceptIndexBegin, exceptIndexEnd);
+    auto performSwap = [&](uint16_t writeCount = 0) {
+        // Don't write any new records
+        eeprom.swapPagesAndWrite(100, NULL, 0);
     };
 
     SECTION("Single record")
     {
         eeprom.put(eepromIndex, 0xBB);
 
-        performCopy();
+        performSwap();
 
         THEN("The record is copied")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, eepromIndex, 0xBB)
             });
         }
@@ -814,11 +808,11 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(eepromIndex, 0xBB);
         eeprom.put(eepromIndex, 0xCC);
 
-        performCopy();
+        performSwap();
 
         THEN("The last record is copied")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, eepromIndex, 0xCC)
             });
         }
@@ -832,11 +826,11 @@ TEST_CASE("Copy records to page", "[eeprom]")
             eeprom.put(eepromIndex, 0xEE);
         });
 
-        performCopy();
+        performSwap();
 
         THEN("The last valid record is copied")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, eepromIndex, 0xCC)
             });
         }
@@ -847,11 +841,11 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(eepromIndex, 0xBB);
         eeprom.put(eepromIndex, 0xFF);
 
-        performCopy();
+        performSwap();
 
         THEN("The record is not copied")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 /* no records */
             });
         }
@@ -864,11 +858,11 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(0, 0xAA);
         eeprom.put(2, 0xCC);
 
-        performCopy();
+        performSwap();
 
         THEN("The records are copied from small ids to large ids")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, 0, 0xAA),
                 Record(Record::VALID, 1, 0xBB),
                 Record(Record::VALID, 2, 0xCC),
@@ -884,16 +878,16 @@ TEST_CASE("Copy records to page", "[eeprom]")
         eeprom.put(0, 0xAA);
         eeprom.put(2, 0xCC);
 
-        exceptIndexBegin = 1;
-        exceptIndexEnd = 3; /* 1 past the last index to avoid copying */
+        uint8_t newData[] = { 0x11, 0x22 };
+        eeprom.swapPagesAndWrite(1, newData, sizeof(newData));
 
-        performCopy();
-
-        THEN("The specified records are not copied")
+        THEN("The specified records are not copied, new values are written")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, 0, 0xAA),
-                Record(Record::VALID, 3, 0xDD)
+                Record(Record::VALID, 3, 0xDD),
+                Record(Record::VALID, 1, 0x11),
+                Record(Record::VALID, 2, 0x22)
             });
         }
     }
@@ -912,11 +906,11 @@ TEST_CASE("Copy records to page", "[eeprom]")
             eeprom.put(0, partialValues, sizeof(partialValues));
         });
 
-        performCopy();
+        performSwap();
 
         THEN("Records up to the invalid record are copied")
         {
-            tester.requireContents(toAddress, PAGE_COPY, {
+            tester.requireContents(toAddress, PAGE_ACTIVE, {
                 Record(Record::VALID, 0, 0xAA),
                 Record(Record::VALID, 1, 0xBB),
                 Record(Record::VALID, 2, 0xCC),
@@ -926,7 +920,7 @@ TEST_CASE("Copy records to page", "[eeprom]")
     }
 }
 
-TEST_CASE("Swap pages", "[eeprom]")
+TEST_CASE("Swap pages recovery", "[eeprom]")
 {
     TestEEPROM eeprom;
     EEPROMTester tester(eeprom);
@@ -939,7 +933,7 @@ TEST_CASE("Swap pages", "[eeprom]")
     });
 
     // Have a record to write after the swap
-    uint16_t newRecordId = 1;
+    uint16_t newIndex = 1;
     uint8_t newData[] = { 20, 30 };
 
     eeprom.init();
@@ -961,7 +955,7 @@ TEST_CASE("Swap pages", "[eeprom]")
 
     auto performSwap = [&]()
     {
-        eeprom.swapPagesAndWrite(newRecordId, newData, sizeof(newData));
+        eeprom.swapPagesAndWrite(newIndex, newData, sizeof(newData));
     };
 
     SECTION("No interruption")
@@ -1105,9 +1099,15 @@ TEST_CASE("Flash wear validation", "[eeprom]")
     };
 
     TestEEPROM eeprom;
+    EEPROMTester tester(eeprom);
+
+    tester.populate(PageBase1, PAGE_ACTIVE);
+    tester.populate(PageBase2, PAGE_ERASED);
+    eeprom.store.resetEraseCount();
+
     eeprom.init();
 
-    int writeCount = 10000;
+    int writeCount = 5000;
 
     INFO("Writing " << writeCount << " records of " << sizeof(Point) << " bytes");
     for(int i = 0; i < writeCount; i++)
@@ -1116,9 +1116,9 @@ TEST_CASE("Flash wear validation", "[eeprom]")
         eeprom.put(0, &p, sizeof(p));
     }
 
-    int maxExpectedErases = 10;
-    INFO("Expected less than " << maxExpectedErases << " erases");
-    REQUIRE(eeprom.store.getEraseCount() < maxExpectedErases);
+    int expectedErases = 3;
+    INFO("Expected at most " << expectedErases << " erases");
+    REQUIRE(eeprom.store.getEraseCount() <= expectedErases);
 }
 
 void loadEEPROMFromFile(const char *filename, TestEEPROM &eeprom, uintptr_t pageAddress, size_t pageSize)
