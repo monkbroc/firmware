@@ -34,7 +34,7 @@
  * emulated EEPROM.
  *
  * Each record contain an index (EEPROM cell virtual address), a data
- * byte and a status byte (valid, invalid, erased).
+ * byte. One bit of the index is used as a valid flag.
  *
  * The maximum number of bytes that can be written is the smallest page
  * size divided by the record size.
@@ -66,8 +66,8 @@
  *
  * Atomic writes are implemented as follows:
  * - If any invalid records exist, do a page swap (which is atomic)
- * - Write records with an invalid status for all changed bytes
- * - Going backwards from the end, write a valid status for all invalid records
+ * - Write records with an invalid flag for all changed bytes
+ * - Going backwards from the end, write a valid flag for all invalid records
  * - If any of the writes failed, do a page swap
  *
  * It is possible for a write to fail verification (reading back the
@@ -132,25 +132,49 @@ public:
 
     // A record stores the value of 1 byte in the emulated EEPROM
     //
+    // An invalid record will have the index MSB bit set
+    //
     // WARNING: Do not change the size of struct or order of elements since
     // instances of this struct are persisted in the flash memory
     struct __attribute__((packed)) Record
     {
-        static const Data EMPTY = 0xFF;
-        static const Data INVALID = 0x0F;
-        static const Data VALID = 0x00;
-
         static const Index EMPTY_INDEX = 0xFFFF;
+        static const Index INVALID_INDEX_FLAG = 0x8000;
 
         Data data;
-        uint8_t status;
+        uint8_t reserved;
         Index index;
 
-        Record(uint8_t status = EMPTY,
-               Address index = EMPTY_INDEX,
-               Data data = FLASH_ERASED)
-            : data(data), status(status), index(index)
+        Record(Address index, Data data)
+            : data(data), reserved(0), index(index)
         {
+        }
+
+        Record()
+            : data(FLASH_ERASED), reserved(0), index(EMPTY_INDEX)
+        {
+        }
+
+        bool empty() const
+        {
+            return index == EMPTY_INDEX;
+        }
+
+        bool valid() const
+        {
+            return (index & INVALID_INDEX_FLAG) == 0;
+        }
+
+        const Record &invalidate()
+        {
+            index |= INVALID_INDEX_FLAG;
+            return *this;
+        }
+
+        const Record &validate()
+        {
+            index &= ~INVALID_INDEX_FLAG;
+            return *this;
         }
     };
 
@@ -375,7 +399,7 @@ public:
             {
                 Index index = indexBegin + i;
                 success = success && writeRecord(writeAddress,
-                        endAddress, index, data[i], Record::INVALID);
+                        endAddress, Record(index, data[i]).invalidate());
             }
         }
 
@@ -384,7 +408,7 @@ public:
         while(success && writeAddress > writeAddressBegin)
         {
             writeAddress -= sizeof(Record);
-            success = success && writeRecordStatus(writeAddress, Record::VALID);
+            success = success && validateRecord(writeAddress);
         }
 
         // If any writes failed because the page was full or a marginal
@@ -411,20 +435,23 @@ public:
 
         forEachRecord(page, [&](Address address, const Record &record) -> bool
         {
-            switch(record.status)
+            if(record.empty())
             {
-                case Record::EMPTY:
-                    emptyAddress = address;
-                    return true;
-                case Record::VALID:
-                    if(record.index >= indexBegin && record.index < indexEnd)
-                    {
-                        existingData[record.index - indexBegin] = record.data;
-                    }
-                    return false;
-                default:
-                    hasInvalidRecords = true;
-                    return true;
+                emptyAddress = address;
+                return true;
+            }
+            else if(record.valid())
+            {
+                if(record.index >= indexBegin && record.index < indexEnd)
+                {
+                    existingData[record.index - indexBegin] = record.data;
+                }
+                return false;
+            }
+            else
+            {
+                hasInvalidRecords = true;
+                return true;
             }
         });
 
@@ -437,9 +464,7 @@ public:
     // marginal erase, true on proper write
     bool writeRecord(Address &writeAddress,
             Address endAddress,
-            Index index,
-            Data data,
-            uint8_t status = Record::VALID)
+            const Record &record)
     {
         // No more room for record
         if(writeAddress + sizeof(Record) > endAddress)
@@ -448,7 +473,6 @@ public:
         }
 
         // Write record and return true when write is verified successfully
-        Record record(status, index, data);
         bool success = (store.write(writeAddress, &record, sizeof(record)) >= 0);
 
         // Advance to next record
@@ -456,15 +480,18 @@ public:
         return success;
     }
 
-    // Write final valid status on a partially written record
+    // Make a partially written record valid
     //
     // Returns false when write was unsuccessful to protect against
     // marginal erase, true on proper write
-    bool writeRecordStatus(Address address, uint8_t status)
+    bool validateRecord(Address address)
     {
-        Record record(status);
-        Address statusAddress = address + offsetof(Record, status);
-        return (store.write(statusAddress, &record.status, sizeof(record.status)) >= 0);
+        Record record;
+        store.read(address, &record, sizeof(record));
+        record.validate();
+
+        Address indexAddress = address + offsetof(Record, index);
+        return (store.write(indexAddress, &record.index, sizeof(record.index)) >= 0);
     }
 
     // Iterate through a page and yield each record, including valid
@@ -502,7 +529,7 @@ public:
     {
         forEachRecord(page, [=](Address address, const Record &record) -> bool
         {
-            if(record.status == Record::VALID)
+            if(record.valid())
             {
                 f(address, record);
                 return false;
@@ -631,7 +658,7 @@ public:
             if(data[i] != FLASH_ERASED)
             {
                 Index index = indexBegin + i;
-                success = success && writeRecord(writeAddress, endAddress, index, data[i]);
+                success = success && writeRecord(writeAddress, endAddress, Record(index, data[i]));
             }
         }
 
@@ -654,7 +681,7 @@ public:
             if(!(record.index >= exceptIndexBegin && record.index < exceptIndexEnd) &&
                 record.data != FLASH_ERASED)
             {
-                success = success && writeRecord(writeAddress, endAddress, record.index, record.data);
+                success = success && writeRecord(writeAddress, endAddress, Record(record.index, record.data));
             }
         });
 

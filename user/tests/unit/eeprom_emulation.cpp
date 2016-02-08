@@ -394,7 +394,7 @@ TEST_CASE("Put record", "[eeprom]")
             eeprom.put(eepromIndex, 0xCC);
 
             tester.requireContents(PageBase1, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xCC)
+                Record(eepromIndex, 0xCC)
             });
         }
 
@@ -444,8 +444,8 @@ TEST_CASE("Put record", "[eeprom]")
             eeprom.put(eepromIndex, 0xDD);
 
             tester.requireContents(PageBase1, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xCC),
-                Record(Record::VALID, eepromIndex, 0xDD)
+                Record(eepromIndex, 0xCC),
+                Record(eepromIndex, 0xDD)
             });
         }
 
@@ -469,7 +469,7 @@ TEST_CASE("Put record", "[eeprom]")
             eeprom.put(eepromIndex, 0xCC);
 
             tester.requireContents(PageBase1, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xCC)
+                Record(eepromIndex, 0xCC)
             });
         }
     }
@@ -798,7 +798,7 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("The record is copied")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xBB)
+                Record(eepromIndex, 0xBB)
             });
         }
     }
@@ -813,7 +813,7 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("The last record is copied")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xCC)
+                Record(eepromIndex, 0xCC)
             });
         }
     }
@@ -831,7 +831,7 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("The last valid record is copied")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, eepromIndex, 0xCC)
+                Record(eepromIndex, 0xCC)
             });
         }
     }
@@ -863,10 +863,10 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("The records are copied from small ids to large ids")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, 0, 0xAA),
-                Record(Record::VALID, 1, 0xBB),
-                Record(Record::VALID, 2, 0xCC),
-                Record(Record::VALID, 3, 0xDD)
+                Record(0, 0xAA),
+                Record(1, 0xBB),
+                Record(2, 0xCC),
+                Record(3, 0xDD)
             });
         }
     }
@@ -884,10 +884,10 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("The specified records are not copied, new values are written")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, 0, 0xAA),
-                Record(Record::VALID, 3, 0xDD),
-                Record(Record::VALID, 1, 0x11),
-                Record(Record::VALID, 2, 0x22)
+                Record(0, 0xAA),
+                Record(3, 0xDD),
+                Record(1, 0x11),
+                Record(2, 0x22)
             });
         }
     }
@@ -911,10 +911,10 @@ TEST_CASE("Copy records during page swap", "[eeprom]")
         THEN("Records up to the invalid record are copied")
         {
             tester.requireContents(toAddress, PAGE_ACTIVE, {
-                Record(Record::VALID, 0, 0xAA),
-                Record(Record::VALID, 1, 0xBB),
-                Record(Record::VALID, 2, 0xCC),
-                Record(Record::VALID, 3, 0xDD)
+                Record(0, 0xAA),
+                Record(1, 0xBB),
+                Record(2, 0xCC),
+                Record(3, 0xDD)
             });
         }
     }
@@ -927,9 +927,9 @@ TEST_CASE("Swap pages recovery", "[eeprom]")
 
     // Write some data
     tester.populate(PageBase1, PAGE_ACTIVE, {
-        Record(Record::VALID, 0, 1),
-        Record(Record::VALID, 1, 2),
-        Record(Record::VALID, 2, 3)
+        Record(0, 1),
+        Record(1, 2),
+        Record(2, 3)
     });
 
     // Have a record to write after the swap
@@ -941,15 +941,15 @@ TEST_CASE("Swap pages recovery", "[eeprom]")
     auto requireSwapCompleted = [&]()
     {
         tester.requireContents(PageBase1, PAGE_INACTIVE, {
-            Record(Record::VALID, 0, 1),
-            Record(Record::VALID, 1, 2),
-            Record(Record::VALID, 2, 3)
+            Record(0, 1),
+            Record(1, 2),
+            Record(2, 3)
         });
 
         tester.requireContents(PageBase2, PAGE_ACTIVE, {
-            Record(Record::VALID, 0, 1),
-            Record(Record::VALID, 1, 20),
-            Record(Record::VALID, 2, 30)
+            Record(0, 1),
+            Record(1, 20),
+            Record(2, 30)
         });
     };
 
@@ -1010,15 +1010,15 @@ TEST_CASE("Swap pages recovery", "[eeprom]")
 
         // Verify that both pages are active
         tester.requireContents(PageBase1, PAGE_ACTIVE, {
-            Record(Record::VALID, 0, 1),
-            Record(Record::VALID, 1, 2),
-            Record(Record::VALID, 2, 3)
+            Record(0, 1),
+            Record(1, 2),
+            Record(2, 3)
         });
 
         tester.requireContents(PageBase2, PAGE_ACTIVE, {
-            Record(Record::VALID, 0, 1),
-            Record(Record::VALID, 1, 20),
-            Record(Record::VALID, 2, 30)
+            Record(0, 1),
+            Record(1, 20),
+            Record(2, 30)
         });
 
         THEN("Page 1 remains the active page")
