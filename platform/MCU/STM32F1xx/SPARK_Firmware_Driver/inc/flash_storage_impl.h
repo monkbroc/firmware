@@ -17,7 +17,7 @@
  ******************************************************************************
  */
 
-#include "flash_mal.h"
+#include "stm32f10x_flash.h"
 #include "string.h"
 
 /**
@@ -28,7 +28,10 @@ class InternalFlashStore
 public:
     int eraseSector(unsigned address)
     {
-        return !FLASH_EraseMemory(FLASH_INTERNAL, address, 1);
+        FLASH_Unlock();
+        FLASH_Status status = FLASH_ErasePage(address);
+        FLASH_Lock();
+        return status != FLASH_COMPLETE;
     }
 
     int write(const unsigned offset, const void* data, const unsigned size)
@@ -37,7 +40,6 @@ public:
         const uint8_t* end_ptr  = data_ptr+size;
         unsigned destination = offset;
         FLASH_Unlock();
-        FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 
         while (data_ptr < end_ptr)
         {
@@ -59,11 +61,21 @@ public:
             }
             else
             {
-                while ((FLASH_COMPLETE != (status = FLASH_ProgramByte(destination, *data_ptr))) && (tries++ < max_tries));
+                // Cannot program single bytes on STM32F1xx so read existing data,
+                // combine with new data and program entire half-word
+                uint16_t existing = *(uint16_t *) dataAt(destination & 0x01);
+                if(destination & 0x01)
+                {
+                    existing = (*data_ptr << 8) | (existing & 0xFF);
+                }
+                else
+                {
+                    existing = (existing << 8) | (*data_ptr & 0xFF);
+                }
+                while ((FLASH_COMPLETE != (status = FLASH_ProgramHalfWord(destination & 0x01, existing))) && (tries++ < max_tries));
                 destination++;
                 data_ptr++;
             }
-
         }
         FLASH_Lock();
         return (memcmp(dataAt(offset), data, size)) ? -1 : 0;

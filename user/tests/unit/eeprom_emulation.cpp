@@ -1,5 +1,5 @@
-// Automatic test runner:
-// user/tests/unit$ rerun -x -p "**/*.{cpp,h}" -d .,../../../services "make runner && obj/runner [eeprom]"
+// Off device tests for the byte-oriented EEPROM emulation
+
 #include "catch.hpp"
 #include <string>
 #include <fstream>
@@ -1224,4 +1224,50 @@ TEST_CASE("Recover from data corruption", "[eeprom]")
     eeprom.get(0, newNumber);
 
     REQUIRE(newNumber == number);
+}
+
+TEST_CASE("Write works for all indexes", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    eeprom.init();
+
+    uint16_t index;
+    uint8_t data;
+
+    // when
+    for(index = 0, data = 0; index < eeprom.capacity(); index++, data++)
+    {
+        eeprom.put(index, data);
+    }
+
+    // then
+    for(index = 0, data = 0; index < eeprom.capacity(); index++, data++)
+    {
+        uint8_t dataRead;
+        eeprom.get(index, dataRead);
+        CAPTURE(index);
+        REQUIRE(dataRead == data);
+    }
+}
+
+TEST_CASE("Write ignored for any address out of range", "[eeprom]")
+{
+    TestEEPROM eeprom;
+    uint16_t index;
+    uint8_t data;
+
+    // when
+    for(index = eeprom.capacity(), data = 0; index < eeprom.capacity() + 10; index++, data++)
+    {
+        eeprom.put(index, data);
+    }
+
+    // then
+    for(index = eeprom.capacity(), data = 0; index < eeprom.capacity() + 10; index++, data++)
+    {
+        uint8_t dataRead;
+        eeprom.get(index, dataRead);
+        CAPTURE(index);
+        REQUIRE(dataRead != data);
+    }
 }

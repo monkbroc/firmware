@@ -63,7 +63,7 @@ struct EERef{
     EERef &operator <<=( uint8_t in )    { return *this = **this << in; }
     EERef &operator >>=( uint8_t in )    { return *this = **this >> in; }
 
-    EERef &update( uint8_t in )          { return  in != *this ? *this = in : *this; }
+    EERef &update( uint8_t in )          { return *this = in; }
 
     /** Prefix increment/decrement **/
     EERef& operator++()                  { return *this += 1; }

@@ -22,6 +22,7 @@
 
 #include <cstring>
 #include <memory>
+#include <map>
 
 /* EEPROM Emulation using Flash memory
  *
@@ -88,8 +89,6 @@
  * alternate page will be erased just before the page swap.
  *
  */
-
-// - TODO: on-device integration tests, dynalib, Wiring API, user documentation, simple performance benchmarks
 
 template <typename Store, uintptr_t PageBase1, size_t PageSize1, uintptr_t PageBase2, size_t PageSize2>
 class EEPROMEmulation
@@ -346,7 +345,7 @@ public:
     {
         // don't write anything if index is out of range
         Index indexEnd = indexBegin + length;
-        if(indexEnd >= capacity())
+        if(indexEnd > capacity())
         {
             return;
         }
@@ -515,39 +514,26 @@ public:
         });
     }
 
-    // Iterate through a page and yield each valid record, in
-    // increasing order of id
+    // Iterate through a page and yield each valid record once, with the
+    // latest value
     template <typename Func>
-    void forEachSortedValidRecord(LogicalPage page, Func f)
+    void forEachUniqueValidRecord(LogicalPage page, Func f)
     {
-        Address currentAddress;
-        Index currentIndex;
-        int32_t previousIndex = -1;
-        bool nextRecordFound;
+        std::map<Index, Address> recordAddresses;
 
-        do
+        forEachValidRecord(page, [&](Address address, const Record &record)
         {
-            nextRecordFound = false;
-            currentIndex = capacity() - 1;
-            forEachValidRecord(page, [&](Address address, const Record &record)
-            {
-                if(record.index <= currentIndex && (int32_t)record.index > previousIndex)
-                {
-                    currentAddress = address;
-                    currentIndex = record.index;
-                    nextRecordFound = true;
-                }
-            });
+            recordAddresses[record.index] = address;
+        });
 
-            if(nextRecordFound)
-            {
-                const Record &record = *(const Record *) store.dataAt(currentAddress);
+        for(auto indexAddress: recordAddresses)
+        {
+            auto address = indexAddress.second;
+            const Record &record = *(const Record *) store.dataAt(address);
 
-                // Yield record
-                f(currentAddress, record);
-                previousIndex = currentIndex;
-            }
-        } while(nextRecordFound);
+            // Yield record
+            f(address, record);
+        }
     }
 
     // Verify that the entire page is erased to protect against resets
@@ -588,7 +574,7 @@ public:
         for(int tries = 0; tries < 2; tries++)
         {
             bool success = true;
-            if(!verifyPage(destinationPage) || tries > 0)
+            if(tries > 0 || !verifyPage(destinationPage))
             {
                 erasePage(destinationPage);
             }
@@ -662,7 +648,7 @@ public:
     {
         bool success = true;
         Address endAddress = getPageEnd(destinationPage);
-        forEachSortedValidRecord(sourcePage, [&](Address address, const Record &record)
+        forEachUniqueValidRecord(sourcePage, [&](Address address, const Record &record)
         {
             // Don't copy the records that are being replaced or records that are 0xFF
             if(!(record.index >= exceptIndexBegin && record.index < exceptIndexEnd) &&
