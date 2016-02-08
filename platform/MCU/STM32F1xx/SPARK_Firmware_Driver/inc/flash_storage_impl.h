@@ -61,20 +61,9 @@ public:
             }
             else
             {
-                // Cannot program single bytes on STM32F1xx so read existing data,
-                // combine with new data and program entire half-word
-                uint16_t existing = *(uint16_t *) dataAt(destination & 0x01);
-                if(destination & 0x01)
-                {
-                    existing = (*data_ptr << 8) | (existing & 0xFF);
-                }
-                else
-                {
-                    existing = (existing << 8) | (*data_ptr & 0xFF);
-                }
-                while ((FLASH_COMPLETE != (status = FLASH_ProgramHalfWord(destination & 0x01, existing))) && (tries++ < max_tries));
-                destination++;
-                data_ptr++;
+                // Cannot program single bytes on STM32F1xx
+                // Avoid programming unaligned addresses or single bytes
+                return -1;
             }
         }
         FLASH_Lock();
